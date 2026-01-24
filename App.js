@@ -6,19 +6,23 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import QRCode from 'react-native-qrcode-svg'; 
 import Svg, { Path, G, Text as SvgText, Circle } from 'react-native-svg'; 
 
+// --- NEW IMPORT ---
+import BluetoothService from './services/BluetoothService';
+import { grabCardFromDevice } from './services/Receiver';
+
 // --- IMPORTS ---
 import CreateCardModal from './components/CreateCardModal'; 
 import ScannerModal from './components/ScannerModal'; 
 import OracleModal from './components/OracleModal'; 
 import IdentityModal from './components/IdentityModal'; 
-import Onboarding from './components/Onboarding'; 
+import Onboarding from './components/Onboarding';
+import { createCard } from './model/Schema';
 
 // MODEL
-import { loadLibrary, saveLibrary, loadProfile, saveProfile } from './model/Storage'; 
-// --- CRYPTO IMPORT (UPDATED) ---
+import { loadLibrary, saveLibrary, loadProfile, saveProfile } from './model/Storage';
 import { getOrGenerateKeys, signData, verifySignature } from './model/Security';
 
-// --- SEED DATA (UNCHANGED) ---
+// --- SEED DATA ---
 const DEFAULT_LIBRARY = [
   { 
       id: 'fit-001', title: 'The "Murph"', topic: 'fitness', hops: 55, author: 'COMMAND', 
@@ -27,7 +31,7 @@ const DEFAULT_LIBRARY = [
   }
 ];
 
-// --- MOCK DATA (UNCHANGED) ---
+// --- MOCK DATA ---
 const MOCK_NEARBY_SIGNALS = [
     { 
       id: 'u1', handle: 'DAN_THE_MAN', rank: 45, dist: '2m',
@@ -54,7 +58,7 @@ const getMajorCategory = (sub) => {
     return 'professional';
 };
 
-// --- MODALS (UNCHANGED UI COMPONENTS) ---
+// --- MODALS ---
 const ChainModal = ({ visible, card, onClose }) => {
     if (!visible || !card) return null;
     return (
@@ -123,16 +127,44 @@ const ContextModal = ({ visible, card, onClose, onSave }) => {
 };
 
 const HandshakeModal = ({ visible, peer, onClose, onGrab, onVerify }) => {
-    // (Unchanged Handshake Logic)
     if (!visible || !peer) return null;
+    const hasData = peer.offer && peer.offer.title;
+
     return (
         <Modal visible={visible} transparent animationType="fade">
             <View style={styles.modalOverlay}>
                 <View style={styles.modalBox}>
                     <Text style={styles.modalTitle}>INCOMING SIGNAL</Text>
-                    <Text style={styles.hsCardTitle}>{peer.offer.title}</Text>
-                    <TouchableOpacity onPress={() => onGrab(peer.offer, 'fork')} style={styles.btnPrimary}><Text style={styles.btnTextBlack}>GRAB</Text></TouchableOpacity>
-                    <TouchableOpacity onPress={onClose} style={styles.btnCancel}><Text style={styles.textGray}>IGNORE</Text></TouchableOpacity>
+                    <Text style={{color:'#00ff00', fontSize:16, textAlign:'center', marginBottom:15, fontFamily: 'Courier'}}>
+                        SOURCE: {peer.handle || "UNKNOWN_DEVICE"}
+                    </Text>
+
+                    {hasData ? (
+                        <>
+                            <Text style={styles.hsCardTitle}>{peer.offer.title}</Text>
+                            <View style={{flexDirection:'row', justifyContent:'center', marginBottom:10}}>
+                                <Text style={{color:'#666', fontSize:10}}>
+                                    HOPS: {peer.offer.hops || 0} • AUTH: {peer.offer.author || 'ANON'}
+                                </Text>
+                            </View>
+                            <TouchableOpacity onPress={() => onGrab(peer.offer, 'fork')} style={styles.btnPrimary}>
+                                <Text style={styles.btnTextBlack}>GRAB INTEL</Text>
+                            </TouchableOpacity>
+                        </>
+                    ) : (
+                        <View style={{padding: 15, backgroundColor: '#1a0000', borderRadius: 8, marginBottom: 15, borderWidth:1, borderColor:'#330000'}}>
+                            <Text style={{color: '#ff4444', textAlign: 'center', fontWeight:'bold'}}>
+                                🚫 NO DATA PAYLOAD
+                            </Text>
+                            <Text style={{color: '#666', textAlign: 'center', fontSize: 10, marginTop: 5}}>
+                                (Civilian Device / Passive Signal)
+                            </Text>
+                        </View>
+                    )}
+
+                    <TouchableOpacity onPress={onClose} style={styles.btnCancel}>
+                        <Text style={styles.textGray}>IGNORE</Text>
+                    </TouchableOpacity>
                 </View>
             </View>
         </Modal>
@@ -142,7 +174,7 @@ const HandshakeModal = ({ visible, peer, onClose, onGrab, onVerify }) => {
 export default function App() {
   const [isLoading, setIsLoading] = useState(true);
   const [cards, setCards] = useState([]);
-  const [profile, setProfile] = useState({ handle: '', keys: null });
+  const [profile, setProfile] = useState({ handle: null, publicKey: null });
   const [activeTab, setActiveTab] = useState('created'); 
   const [activeTopicFilter, setActiveTopicFilter] = useState(null); 
   const [viewMode, setViewMode] = useState('wheel'); 
@@ -159,130 +191,203 @@ export default function App() {
 
   useEffect(() => {
     const boot = async () => {
-      // 1. Initialize Crypto Identity
+      // --- 1. IDENTITY ---
       const keys = await getOrGenerateKeys();
       if (keys) {
          console.log("🆔 PUBLIC KEY:", keys.publicKey);
-         // Update profile state with keys
          setProfile(prev => ({ ...prev, publicKey: keys.publicKey }));
       }
 
+      // --- 2. LOAD DATA ---
       const savedProfile = await loadProfile();
       let savedCards = await loadLibrary(); 
-      if (!savedCards || savedCards.length === 0) { savedCards = DEFAULT_LIBRARY; await saveLibrary(savedCards); }
-      if (savedProfile && savedProfile.handle) setProfile(prev => ({ ...prev, ...savedProfile }));
-      setCards(savedCards); setIsLoading(false);
+      if (!savedCards || savedCards.length === 0) { 
+          savedCards = DEFAULT_LIBRARY; 
+          await saveLibrary(savedCards); 
+      }
+      if (savedProfile && savedProfile.handle) {
+          setProfile(prev => ({ ...prev, ...savedProfile }));
+      }
+      setCards(savedCards); 
+      setIsLoading(false);
+      
+      // DELETED: BluetoothService.startScanning(...) 
+      // The radar is now silent by default.
     };
+
     boot();
+
+    // CLEANUP: Stop everything when app closes
+    return () => {
+        BluetoothService.stopScanning();
+        BluetoothService.stopBroadcasting();
+    };
   }, []);
 
   const updateLibrary = (newCards) => { setCards(newCards); saveLibrary(newCards); };
   
-  const handleScanSimulation = () => {
-      setDetectedUsers([]);
-      setTimeout(() => setDetectedUsers([MOCK_NEARBY_SIGNALS[0]]), 1500);
+  // --- BROADCAST TOGGLE ---
+  const toggleBroadcast = async () => {
+      if (viewMode === 'broadcast') {
+          // Turning OFF
+          await BluetoothService.stopBroadcasting();
+          setViewMode('wheel');
+      } else {
+          // Turning ON
+          // TEST: We grab the first card from your "Knowledge" list
+          const cardToSend = cards.find(c => c.genesis && c.genesis.author_id === profile.handle);
+          
+          if (cardToSend) {
+            console.log(">> UI: Broadcasting Card:", cardToSend.title);
+            await BluetoothService.startBroadcasting(profile.handle, cardToSend);
+          } else {
+            console.log(">> UI: No cards to send. Broadcasting Identity.");
+            await BluetoothService.startBroadcasting(profile.handle);
+          }
+          
+          setViewMode('broadcast');
+      }
   };
 
-  // --- 1. SIGNED CREATE ---
-  const handleCreateCard = async (c) => {
-    const id = Date.now().toString();
-    
-    // Create the payload to sign
-    const payload = {
-        id, 
-        author: profile.handle, 
-        title: c.title, 
-        body: c.body, 
-        timestamp: new Date().toISOString()
-    };
-    
-    // Generate Cryptographic Signature
-    const signature = await signData(payload);
-    
-    const nc = { 
-        ...c, id, author: profile.handle, created_at: new Date().toISOString(), hops: 1, topic: c.topic || 'general',
-        // The History now contains the REAL signature
-        history: [{ 
-            date: new Date().toISOString().split('T')[0], 
-            user: profile.handle, 
-            action: 'CREATED', 
-            signature: signature 
-        }]
-    };
-    updateLibrary([nc, ...cards]); setIsCreateVisible(false);
-  };
-
-  // --- 2. SIGNED GRAB ---
-  const handleGrabCard = async (offer, version) => {
-      let finalCard = { ...offer, id: Date.now().toString() };
+  // THE NEW "PING" HANDLER
+  const handleActivateRadar = () => {
+      console.log(">> UI: Radar Activated by User");
       
-      const payload = { action: 'DOWNLOAD', parent_id: offer.id, downloader: profile.handle };
-      const signature = await signData(payload);
-
-      finalCard.history = [ 
-          ...finalCard.history, 
-          { date: new Date().toISOString().split('T')[0], user: profile.handle, action: 'DOWNLOADED', signature: signature } 
-      ];
-      updateLibrary([finalCard, ...cards]);
-      Alert.alert("Success", "Intel Acquired & Signed.");
+      // Start the Service (Real or Sim)
+      BluetoothService.startScanning((device) => {
+          setDetectedUsers(prev => {
+              const exists = prev.find(u => u.id === device.id);
+              if (exists) {
+                  // Update distance/RSSI
+                  return prev.map(u => u.id === device.id ? { ...u, dist: device.rssi, _rawDevice: device } : u);
+              } else {
+                  // Add new blip
+                  return [...prev, {
+                      id: device.id,
+                      handle: (device.name || "UNKNOWN_SIG").substring(0, 12),
+                      rank: Math.floor(Math.random() * 50), 
+                      dist: device.rssi, 
+                      offer: { title: "Signal Detected...", author: "..." }, 
+                      _rawDevice: device 
+                  }];
+              }
+          });
+      });
   };
 
-  // --- 3. SIGNED FORK ---
+  const handleCreateCard = async (c) => {
+    try {
+      // 1. MAP LEGACY TOPIC TO NEW TAXONOMY
+      // If user typed "football", we turn it into "human/sports/football"
+      // If no topic, we default to "human/general"
+      const cleanTopic = c.topic ? c.topic.toLowerCase().replace(/\s+/g, '_') : 'general';
+      const taxonomyPath = `human/${cleanTopic}`;
+
+      // 2. CREATE THE V2 SMART CARD
+      // This runs the "PhotoDNA" hash check automatically.
+      const newCard = await createCard(profile.handle, c.title, c.body, taxonomyPath);
+
+      // 3. SIGN THE GENESIS BLOCK (Proof of Authorship)
+      // We sign the 'genesis' object so we can prove who started this chain.
+      const signature = await signData(JSON.stringify(newCard.genesis));
+      newCard.genesis.signature = signature;
+
+      // 4. SAVE & UPDATE UI
+      const updatedCards = [newCard, ...cards];
+      setCards(updatedCards);       // Update Screen
+      await saveLibrary(updatedCards); // Save to V2 Storage
+      
+      setIsCreateVisible(false); // Close Modal
+
+    } catch (error) {
+      // This catches the "Safety Protocol" errors (Banned Content)
+      alert(`Security Alert: ${error.message}`);
+    }
+  };
+
+  const handleGrabCard = async (offer, version) => {
+      // 1. GET THE RAW DEVICE
+      // We stored this in activePeer._rawDevice in the step above
+      const targetDevice = activePeer?._rawDevice;
+
+      if (!targetDevice) {
+          Alert.alert("Error", "Signal lost. Cannot connect.");
+          return;
+      }
+
+      console.log(">> STARTING DOWNLOAD FROM:", targetDevice.id);
+      setIsLoading(true); // Show spinner/loading state
+
+      // 2. TRIGGER THE RECEIVER (The Mitt)
+      grabCardFromDevice(
+          targetDevice,
+          (percent) => console.log(`>> DOWNLOADING: ${percent}%`), // Optional: Add a UI progress bar later
+          async (card, error) => {
+              setIsLoading(false);
+              
+              if (error) {
+                  Alert.alert("Transfer Failed", "Could not complete the handshake.");
+                  console.error(error);
+                  return;
+              }
+
+              if (card) {
+                  // 3. SUCCESS - WE HAVE THE INTEL
+                  // Now we verify and save it using your Phase 4 Schema
+                  
+                  // A. Add "Received" Metadata
+                  const newCard = { 
+                      ...card, 
+                      received_at: new Date().toISOString(), 
+                      hops: (card.hops || 0) + 1,
+                      // We track that we downloaded this
+                      history: [
+                          ...(card.history || []), 
+                          { date: new Date().toISOString().split('T')[0], user: profile.handle, action: 'DOWNLOADED' }
+                      ]
+                  };
+
+                  // B. Save to Library
+                  updateLibrary([newCard, ...cards]);
+                  
+                  // C. Close UI
+                  setActivePeer(null);
+                  Alert.alert("SECURE TRANSFER COMPLETE", `Acquired: ${newCard.title}`);
+              }
+          }
+      );
+  };
+
   const handleForkCard = async (originalCard, contextNote) => {
       const payload = { action: 'FORK', parent_id: originalCard.id, note: contextNote };
       const signature = await signData(payload);
 
-      const newHistory = [
-          ...(originalCard.history || []), 
-          { date: new Date().toISOString().split('T')[0], user: profile.handle, action: 'FORKED', note: contextNote, signature: signature }
-      ];
+      const newHistory = [ ...(originalCard.history || []), { date: new Date().toISOString().split('T')[0], user: profile.handle, action: 'FORKED', note: contextNote, signature: signature }];
       const newCard = { ...originalCard, id: Date.now().toString(), author: profile.handle, created_at: new Date().toISOString(), history: newHistory };
       updateLibrary([newCard, ...cards]);
       setCardToFork(null); setSelectedCard(null); 
       Alert.alert("Fork Complete", "New crypto-signature generated.");
   };
 
-  // --- 4. VERIFIED SCAN (THE AUDITOR) ---
-  // --- 4. VERIFIED SCAN (THE AUDITOR) ---
   const handleRealScan = async (scannedData) => {
-      console.log("Scanned Data:", scannedData);
-
-      // A. Verify Integrity (The Double Check)
-      // Even though the Scanner UI checked it, the App Logic must also check it before saving.
       const genesisEntry = scannedData.history && scannedData.history[0];
-      
       if (!genesisEntry || !genesisEntry.signature) {
           Alert.alert("Security Alert", "This card lacks a valid digital signature. Discarding.");
           setIsScannerVisible(false);
           return;
       }
-
-      // Check if we already have it
       const alreadyExists = cards.find(c => c.id === scannedData.id);
       if (alreadyExists) {
           Alert.alert("Duplicate Intel", `You already have "${scannedData.title}" in your library.`);
           setIsScannerVisible(false);
           return;
       }
-
-      // B. Add to Library
-      const newCard = {
-          ...scannedData,
-          received_at: new Date().toISOString(),
-          hops: (scannedData.hops || 0) + 1,
-          read: false
-      };
-
+      const newCard = { ...scannedData, received_at: new Date().toISOString(), hops: (scannedData.hops || 0) + 1, read: false };
       updateLibrary([newCard, ...cards]);
       setIsScannerVisible(false);
-      
-      // Success Haptic/Alert
-      setTimeout(() => {
-        Alert.alert("Verified Intel", `Successfully decrypted & verified:\n${newCard.title}`);
-      }, 500);
+      setTimeout(() => { Alert.alert("Verified Intel", `Successfully decrypted & verified:\n${newCard.title}`); }, 500);
   };
 
-  // --- VISUALIZATION HELPERS (UNCHANGED) ---
   const expertise = React.useMemo(() => {
     const s = {};
     cards.forEach(c => { const m = getMajorCategory(c.topic); s[m] = (s[m]||0) + 5 + ((c.hops||1)-1)*2; });
@@ -312,15 +417,27 @@ export default function App() {
 
   const filteredCards = React.useMemo(() => {
     let l = cards;
-    if (activeTab === 'created') l = l.filter(c => c.author === profile.handle);
-    else l = l.filter(c => c.author !== profile.handle);
-    if (activeTopicFilter) l = l.filter(c => getMajorCategory(c.topic) === activeTopicFilter);
+
+    // HELPER: Get the author ID regardless of V1 or V2 format
+    const getAuthor = (c) => c.author || (c.genesis && c.genesis.author_id);
+
+    if (activeTab === 'created') {
+        // Show cards where I AM the author
+        l = l.filter(c => getAuthor(c) === profile.handle);
+    } else {
+        // Show cards where I am NOT the author
+        l = l.filter(c => getAuthor(c) !== profile.handle);
+    }
+
+    if (activeTopicFilter) {
+        l = l.filter(c => getMajorCategory(c.topic || (c.path ? c.path.split('/')[1] : 'general')) === activeTopicFilter);
+    }
+
     return l.sort((a,b) => (b.hops||1) - (a.hops||1));
   }, [cards, activeTopicFilter, activeTab, profile]);
 
   if (isLoading) return <View style={styles.center}><Text style={styles.textGreen}>Loading...</Text></View>;
   if (!profile.handle) return <Onboarding visible={true} onComplete={async (p) => { 
-      // Updated Onboarding to use keys
       const keys = await getOrGenerateKeys(); 
       await saveProfile({...p, ...keys}); 
       setProfile({...p, ...keys}); 
@@ -330,9 +447,9 @@ export default function App() {
     <SafeAreaView style={styles.container}>
       <StatusBar barStyle="light-content" translucent backgroundColor="transparent" />
 
-      {/* HEADER (UNCHANGED) */}
+      {/* HEADER - Updated to use toggleBroadcast */}
       <View style={styles.topHeader}>
-        <TouchableOpacity onPress={() => setViewMode(viewMode === 'broadcast' ? 'wheel' : 'broadcast')} 
+        <TouchableOpacity onPress={toggleBroadcast} 
             style={[styles.broadcastBtnCompact, viewMode === 'broadcast' && {borderColor:'#00ff00', backgroundColor:'#003300'}]}>
             <Text style={[styles.broadcastText, viewMode === 'broadcast' && {color:'#00ff00'}]}>
                 {viewMode === 'broadcast' ? '(( ON AIR ))' : '📡 BROADCAST'}
@@ -341,7 +458,7 @@ export default function App() {
         <Text style={styles.headerRank}>OP: {profile.handle.substring(0,8).toUpperCase()}</Text>
       </View>
 
-      {/* VIEW SWITCHER */}
+      {/* VIEW SWITCHER - Stop Broadcasting when closing view */}
       {viewMode === 'broadcast' && (
           <View style={{flex: 1, padding: 20, alignItems:'center', justifyContent:'center'}}>
               <Text style={{color:'#00ff00', fontSize: 24, fontWeight:'bold', marginBottom:10}}>BROADCASTING</Text>
@@ -350,7 +467,7 @@ export default function App() {
                   <View style={[styles.radarCircle, {width: 100, height: 100, borderRadius: 50, borderColor:'#00ff00', borderWidth:2}]} />
                   <View style={{position:'absolute'}}><Text style={{fontSize:40}}>📡</Text></View>
               </View>
-              <TouchableOpacity onPress={() => setViewMode('wheel')} style={styles.btnOutline}><Text style={styles.textGray}>STOP BROADCAST</Text></TouchableOpacity>
+              <TouchableOpacity onPress={toggleBroadcast} style={styles.btnOutline}><Text style={styles.textGray}>STOP BROADCAST</Text></TouchableOpacity>
           </View>
       )}
 
@@ -368,7 +485,11 @@ export default function App() {
                       </TouchableOpacity>
                   ))}
               </View>
-              <TouchableOpacity onPress={handleScanSimulation} style={styles.btnPrimary}><Text style={styles.btnTextBlack}>PING SURROUNDINGS</Text></TouchableOpacity>
+              
+              {/* FIXED: Removed the stray comment that was here */}
+              <TouchableOpacity onPress={handleActivateRadar} style={styles.btnPrimary}>
+                  <Text style={styles.btnTextBlack}>PING SURROUNDINGS</Text>
+              </TouchableOpacity>          
           </View>
       )}
 
@@ -407,7 +528,13 @@ export default function App() {
             <FlatList data={filteredCards} keyExtractor={i=>i.id} contentContainerStyle={{paddingHorizontal: 20, paddingBottom: 100}} renderItem={({item}) => (
                 <TouchableOpacity onPress={()=>setSelectedCard(item)} style={styles.card}>
                     <Text style={styles.cardTitle}>{item.title}</Text>
-                    <View style={{flexDirection:'row', justifyContent:'space-between'}}><Text style={{color:'#666', fontSize:10}}>{item.topic.toUpperCase()}</Text><Text style={{color:'#00ff00', fontSize:10}}>HOPS: {item.hops}</Text></View>
+<View style={{flexDirection:'row', justifyContent:'space-between'}}>
+  <Text style={{color:'#666', fontSize:10}}>
+{/* Checks if path exists AND has a slash before splitting */}
+{(item.path && item.path.includes('/') ? item.path.split('/')[1] : (item.topic || 'GENERAL')).toUpperCase()}
+</Text>
+  <Text style={{color:'#00ff00', fontSize:10}}>HOPS: {item.hops || 0}</Text>
+</View>
                 </TouchableOpacity>
             )} />
           </>
@@ -432,26 +559,21 @@ export default function App() {
       
       <CreateCardModal visible={isCreateVisible} onClose={()=>setIsCreateVisible(false)} onSave={handleCreateCard} />
       
-      {/* INLINE CARD DETAIL MODAL */}
       <Modal visible={!!selectedCard} transparent animationType="slide">
           <View style={styles.modalOverlay}>
               <View style={styles.modalBox}>
                   <Text style={styles.modalTitle}>{selectedCard?.title}</Text>
                   <Text style={styles.cardBody}>{selectedCard?.body}</Text>
-                  
-{/* --- NEW CODE STARTS HERE --- */}
-            <View style={{ alignItems: 'center', marginVertical: 20 }}>
-                {selectedCard?.id ? (
-                    <QRCode 
-                        value={JSON.stringify(selectedCard)}  // Or JSON.stringify(selectedCard)
-                        size={150}
-                        color="black"
-                        backgroundColor="white"
-                    />
-                ) : null}
-            </View>
-            {/* --- NEW CODE ENDS HERE --- */}
-
+                  <View style={{ alignItems: 'center', marginVertical: 20 }}>
+                      {selectedCard?.id ? (
+                          <QRCode 
+                              value={JSON.stringify(selectedCard)} 
+                              size={150}
+                              color="black"
+                              backgroundColor="white"
+                          />
+                      ) : null}
+                  </View>
                   <View style={{flexDirection:'row', marginTop: 20, justifyContent:'space-between'}}>
                       <TouchableOpacity onPress={() => { setChainCard(selectedCard); setSelectedCard(null); }} style={styles.btnSmallOutline}>
                           <Text style={styles.btnTextGray}>⛓ CHAIN OF CUSTODY</Text>

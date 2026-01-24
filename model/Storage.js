@@ -1,3 +1,7 @@
+// model/Storage.js
+// DATA ENGINE v2.0
+// Handles storage, retrieval, and the new Taxonomy logic.
+
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const KEYS = {
@@ -26,6 +30,21 @@ export const saveLibrary = async (cards) => {
   }
 };
 
+// --- SMART QUERYING (The "Shout" Logic) ---
+
+// This mimics a database query: "Find me cards about NFL Rules"
+// Supports hierarchy: Query "human/sports" matches "human/sports/football"
+export const queryLibrary = async (pathQuery) => {
+  const allCards = await loadLibrary();
+  
+  if (!pathQuery) return allCards;
+
+  return allCards.filter(card => {
+    // Check if card.path exists (Legacy cards might not have it)
+    return card.path && card.path.startsWith(pathQuery);
+  });
+};
+
 // --- IDENTITY MANAGEMENT ---
 
 export const loadProfile = async () => {
@@ -46,29 +65,38 @@ export const saveProfile = async (profile) => {
   }
 };
 
-// CALCULATE EXPERTISE SCORE
-// Returns an object like: { 'cooking': 15, 'history': 5 } based on card downloads
+// --- EXPERTISE CALCULATION (Updated for Taxonomy) ---
+
+// Returns scores based on the new "Path" structure.
+// e.g. "human/sports/nfl" gives points to "human" AND "sports"
 export const calculateExpertise = (cards, userHandle) => {
   const scores = {};
 
-  // 1. Look at cards I AUTHORIZED (My creations)
-  const myCards = cards.filter(c => c.author === userHandle);
+  // 1. Filter for cards I AUTHORIZED
+  const myCards = cards.filter(c => c.genesis && c.genesis.author_id === userHandle);
 
   myCards.forEach(card => {
-    // If the card has a 'topic', boost that topic score
-    if (card.topic) {
-        // Base score for creating a card
-        const currentScore = scores[card.topic] || 0;
-        let boost = 1; 
-
-        // Boost by number of "Hops/Downloads" (if we tracked them locally via receipts)
-        // Since we are offline, we rely on the 'hops' count returned in the card metadata
-        // In a true mesh, we would sum the 'receipts' you mentioned.
-        if (card.hops) {
-            boost += (card.hops - 1) * 2; // Each download adds 2 points
-        }
+    if (card.path) {
+        // Split the path: "human/sports/nfl" -> ["human", "sports", "nfl"]
+        const categories = card.path.split('/');
         
-        scores[card.topic] = currentScore + boost;
+        // Calculate Boost (Hops = Viral spread)
+        let boost = 1;
+        if (card.hops) {
+            boost += (card.hops * 0.5); // 0.5 points per download
+        }
+
+        // Award points to the ROOT category (e.g., "human")
+        const rootCategory = categories[0];
+        if (rootCategory) {
+           scores[rootCategory] = (scores[rootCategory] || 0) + boost;
+        }
+
+        // Award partial points to the SUB category (e.g., "sports")
+        const subCategory = categories[1];
+        if (subCategory) {
+           scores[subCategory] = (scores[subCategory] || 0) + (boost * 0.5);
+        }
     }
   });
 
