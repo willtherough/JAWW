@@ -2,7 +2,7 @@
 // THE MEAT GRINDER v1.0
 // Slices large cards into tiny Bluetooth packets and rebuilds them.
 
-const PACKET_LIMIT = 24; // Bytes per packet (Safe for BLE Legacy Advertising)
+const PACKET_LIMIT = 12; // DIET MODE: Reduced to 12 bytes to fit alongside the 16-byte UUID.
 
 // --- 1. SLICE (Server Side) ---
 export const chunkData = (dataString) => {

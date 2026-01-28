@@ -1,103 +1,88 @@
-// model/Schema.js
-// THE SOURCE PROTOCOL v2.0
-// Includes: Taxonomy, Reputation Engine, and Safety Safeguards
-
 import * as Crypto from 'expo-crypto';
 
 export const CARD_VERSION = "2.0";
 
 // --- 1. SAFEGUARD LISTS (The "PhotoDNA" Shield) ---
-// In a production app, these hashes would be loaded from a secure file/API.
-// This prevents known illegal content from being created or saved.
-const BANNED_HASHES = [
-  // e.g., "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-];
+const BANNED_HASHES = [];
 
 // --- 2. TAXONOMY (The "Infinite Filing Cabinet") ---
-// We use hierarchical paths for sorting.
 export const TAXONOMY_ROOTS = {
-  HUMAN: 'human',   // Culture, Sports, History
-  SURVIVAL: 'survival', // Fitness, Medical, Shelter
-  TECH: 'tech',     // Coding, Radio, Engineering
-  MARKET: 'market', // For Sale, Barter, Gigs
-  BEACON: 'beacon'  // Location, Wi-Fi, Safety Info
+  HUMAN: 'human',   
+  SURVIVAL: 'survival', 
+  TECH: 'tech',     
+  MARKET: 'market', 
+  BEACON: 'beacon'  
 };
 
-// --- 3. REPUTATION ENGINE (The "Digital Immune System") ---
-export const calculateTrustScore = (card, userNetwork = []) => {
-  // A. SAFETY CHECK: If this card has too many "Danger" flags, Rank = 0.
+// --- 3. THE INTEREST BOOST (Personalization Algorithm) ---
+export const calculateInterestScore = (card, userInterests = []) => {
+  if (!userInterests || userInterests.length === 0) return 1.0;
+  
+  // MERGE: Added card.path to ensure we catch topics hidden in the file path
+  const cardContent = (card.title + " " + (card.topic || "") + " " + (card.path || "") + " " + (card.body || "")).toLowerCase();
+  
+  let boost = 1.0;
+  userInterests.forEach(interest => {
+    if (cardContent.includes(interest.toLowerCase())) {
+      boost += 0.5; // 50% boost for matching keywords
+    }
+  });
+  return boost;
+};
+
+// --- 4. REPUTATION ENGINE (The "Digital Immune System") ---
+export const calculateTrustScore = (card, userNetwork = [], userInterests = []) => {
   if (card.safety && card.safety.flag_count > 5) return 0;
 
   let score = 0;
-  
-  // B. VELOCITY CHECK (Time-Weighted)
-  // New cards (< 24 hours) are capped to prevent "Viral Bot" attacks.
-  // Note: We use a safe check in case genesis is missing (backward compatibility)
-  const genesisTime = card.genesis ? new Date(card.genesis.timestamp).getTime() : Date.now();
-  const ageInHours = (Date.now() - genesisTime) / 36e5;
-  const velocityCap = ageInHours < 24 ? 10 : 1000;
-
-  // C. WEB OF TRUST (Relation Check)
-  // Count endorsements ONLY from people in the user's known network.
-  const endorsements = card.endorsements || [];
-  const validEndorsements = endorsements.filter(e => 
+  const validEndorsements = (card.endorsements || []).filter(e => 
     userNetwork.includes(e.author_id)
   );
+  score = (validEndorsements.length * 10) + 10;
 
-  // D. EFFORT CHECK (Context)
-  // Cards with context (Fork Depth > 0) get a trust multiplier.
   const contextMultiplier = (card.fork_depth || 0) > 0 ? 1.5 : 1.0;
+  const interestMultiplier = calculateInterestScore(card, userInterests);
 
-  score = (validEndorsements.length * 10) * contextMultiplier;
+  const finalScore = score * contextMultiplier * interestMultiplier;
 
-  return Math.min(score, velocityCap);
+  const ageInHours = (Date.now() - (card.genesis ? new Date(card.genesis.timestamp).getTime() : Date.now())) / 36e5;
+  const velocityCap = ageInHours < 24 ? 50 : 5000;
+
+  return Math.min(finalScore, velocityCap);
 };
 
-// --- 4. THE CONSTRUCTOR ---
+// --- 5. THE CARD CONSTRUCTOR ---
 export const createCard = async (authorId, title, body, path, type = 'standard') => {
   const timestamp = new Date().toISOString();
-  
-  // GENERATE CONTENT HASH (Defense #1)
-  // We fingerprint the content immediately.
   const contentString = title + body;
   const contentHash = await Crypto.digestStringAsync(
     Crypto.CryptoDigestAlgorithm.SHA256,
     contentString
   );
 
-  // CHECK BLOCKLIST
   if (BANNED_HASHES.includes(contentHash)) {
     throw new Error("Content flagged as prohibited by safety protocol.");
   }
   
   return {
-    // IDENTITY
     id: `${authorId}-${Date.now()}`,
     version: CARD_VERSION,
     type: type, 
-
-    // CONTENT
     title: title,
     body: body,
     path: path, 
-    hash: contentHash, // Stores the fingerprint
-
-    // GENESIS (Anti-Mule Defense)
+    hash: contentHash,
     genesis: {
       author_id: authorId,
       timestamp: timestamp,
       signature: null, 
       location_fuzzed: null 
     },
-
-    // SAFETY (The "Poisoned Soil" Protocol)
     safety: {
       flag_count: 0, 
       last_flagged: null,
       min_app_version: "1.0" 
     },
-
-    // CHAIN OF CUSTODY
     history: [
       {
         action: 'CREATED',
@@ -106,20 +91,42 @@ export const createCard = async (authorId, title, body, path, type = 'standard')
         note: 'Original Entry'
       }
     ],
-
-    // SOCIAL PROOF
     endorsements: [], 
-    
-    // MARKETPLACE (The Business Model)
     commercial: {
       is_for_sale: false,
       price: 0,
       currency: 'USDC', 
       owner_wallet: null
     },
-
-    // METADATA
     hops: 0,
     fork_depth: 0 
+  };
+};
+
+// --- 6. IDENTITY CONSTRUCTOR ---
+export const createIdentityCard = (profile, publicKey) => {
+  return {
+    type: 'SOURCE_IDENTITY_V1',
+    id: publicKey, 
+    version: CARD_VERSION,
+    payload: {
+      handle: profile.handle,
+      role: profile.role || 'Observer',
+      interests: profile.interests || [],
+      // MERGE: This is the critical addition for IdentityModal compatibility
+      bio: profile.bio || { 
+        age: profile.age, 
+        weight: profile.weight, 
+        height: profile.height, 
+        diet: profile.diet, 
+        expertise: profile.expertise 
+      },
+      timestamp: new Date().toISOString(),
+    },
+    signature: null,
+    reputation: {
+      vouch_count: 0,
+      verified_status: false
+    }
   };
 };

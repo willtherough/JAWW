@@ -5,13 +5,15 @@ export default function ProfileModal({ visible, onClose, currentProfile, onSave 
   // Local state for the form
   const [formData, setFormData] = useState({
     handle: '',
+    role: '', 
+    interests: '', // NEW: For Radar Boosting
     age: '',
     height: '',
     weight: '',
     diet: '',
     expertise: '',
     hobbies: '',
-    housing: 'RENT' // Default
+    housing: 'RENT'
   });
 
   // Load existing data when modal opens
@@ -19,9 +21,12 @@ export default function ProfileModal({ visible, onClose, currentProfile, onSave 
     if (visible && currentProfile) {
       setFormData({
         handle: currentProfile.handle || '',
+        role: currentProfile.role || '',
+        // Join array back to string for editing
+        interests: currentProfile.interests ? currentProfile.interests.join(', ') : '',
         age: currentProfile.age ? String(currentProfile.age) : '',
         height: currentProfile.height || '',
-        weight: currentProfile.weight ? String(currentProfile.weight) : '',
+        weight: currentProfile.weight || '',
         diet: currentProfile.diet || '',
         expertise: currentProfile.expertise || '',
         hobbies: currentProfile.hobbies || '',
@@ -35,16 +40,22 @@ export default function ProfileModal({ visible, onClose, currentProfile, onSave 
   };
 
   const handleSave = () => {
-    // Basic validation
     if (!formData.handle) {
       alert("Operator Handle is required.");
       return;
     }
 
-    // Prepare clean object for storage
+    // Convert "NFL, Cooking, History" -> ["nfl", "cooking", "history"]
+    const interestArray = formData.interests
+      .split(',')
+      .map(i => i.trim().toLowerCase())
+      .filter(i => i !== "");
+
     const cleanProfile = {
-      ...currentProfile, // keep ID
+      ...currentProfile,
       handle: formData.handle,
+      role: formData.role,
+      interests: interestArray, // Saving as clean array
       age: formData.age,
       height: formData.height,
       weight: formData.weight,
@@ -52,7 +63,7 @@ export default function ProfileModal({ visible, onClose, currentProfile, onSave 
       expertise: formData.expertise,
       hobbies: formData.hobbies,
       housing: formData.housing,
-      is_onboarded: true // Mark as setup complete
+      is_onboarded: true
     };
 
     onSave(cleanProfile);
@@ -64,7 +75,6 @@ export default function ProfileModal({ visible, onClose, currentProfile, onSave 
       <View style={styles.container}>
         <SafeAreaView style={{ flex: 1, paddingTop: Platform.OS === 'android' ? StatusBar.currentHeight : 0 }}>
           
-          {/* HEADER */}
           <View style={styles.header}>
             <Text style={styles.headerTitle}>OPERATOR BIO-DATA</Text>
             <TouchableOpacity onPress={onClose} style={{ padding: 10 }}>
@@ -75,8 +85,8 @@ export default function ProfileModal({ visible, onClose, currentProfile, onSave 
           <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} style={{ flex: 1 }}>
             <ScrollView style={styles.form}>
               
-              {/* SECTION 1: IDENTITY */}
               <Text style={styles.sectionHeader}>// IDENTITY</Text>
+              
               <Text style={styles.label}>OPERATOR HANDLE (Required)</Text>
               <TextInput 
                 style={styles.input} 
@@ -86,7 +96,26 @@ export default function ProfileModal({ visible, onClose, currentProfile, onSave 
                 placeholderTextColor="#555"
               />
 
-              {/* SECTION 2: PHYSIOLOGICAL */}
+              <Text style={styles.label}>PRIMARY ARCHETYPE / ROLE</Text>
+              <TextInput 
+                style={styles.input} 
+                value={formData.role} 
+                onChangeText={t => handleChange('role', t)}
+                placeholder="e.g. The NFL Guy, Medic, Mechanic" 
+                placeholderTextColor="#555"
+              />
+
+              {/* NEW SECTION: RADAR PREFERENCES */}
+              <Text style={styles.sectionHeader}>// RADAR PREFERENCES</Text>
+              <Text style={styles.label}>INTERESTS (Comma separated - e.g. nfl, history, cooking)</Text>
+              <TextInput 
+                style={[styles.input, { borderColor: '#00ff00', borderWidth: 1 }]} 
+                value={formData.interests} 
+                onChangeText={t => handleChange('interests', t)}
+                placeholder="Keywords to boost on your Radar" 
+                placeholderTextColor="#555"
+              />
+
               <Text style={styles.sectionHeader}>// PHYSIOLOGICAL DATA</Text>
               <View style={styles.row}>
                 <View style={{ flex: 1, marginRight: 10 }}>
@@ -106,52 +135,23 @@ export default function ProfileModal({ visible, onClose, currentProfile, onSave 
                 </View>
               </View>
 
-              {/* SECTION 3: DIETARY NEEDS */}
-              <Text style={styles.sectionHeader}>// DIETARY PROTOCOLS</Text>
-              <Text style={styles.label}>LIMITATIONS / CHOICES</Text>
-              <TextInput 
-                style={styles.input} 
-                value={formData.diet} 
-                onChangeText={t => handleChange('diet', t)}
-                placeholder="e.g. Gluten Free, Keto, Diabetic..." 
-                placeholderTextColor="#555"
-              />
-
-              {/* SECTION 4: EXPERTISE */}
-              <Text style={styles.sectionHeader}>// EXPERTISE & HOBBIES</Text>
-              <Text style={styles.label}>SPECIALIZATIONS (Work, Degree, Skills)</Text>
+              <Text style={styles.sectionHeader}>// EXPERTISE & CONTEXT</Text>
+              <Text style={styles.label}>SPECIALIZATIONS (Degrees, Skills)</Text>
               <TextInput 
                 style={styles.input} 
                 value={formData.expertise} 
                 onChangeText={t => handleChange('expertise', t)}
-                placeholder="e.g. History Degree, React Native, Carpentry" 
+                placeholder="e.g. History Degree, React Native" 
                 placeholderTextColor="#555"
               />
-              <Text style={styles.label}>HOBBIES / INTERESTS</Text>
+              <Text style={styles.label}>LIMITATIONS / DIET</Text>
               <TextInput 
                 style={styles.input} 
-                value={formData.hobbies} 
-                onChangeText={t => handleChange('hobbies', t)}
-                placeholder="e.g. Guitar, Cars, Writing" 
+                value={formData.diet} 
+                onChangeText={t => handleChange('diet', t)}
+                placeholder="e.g. Gluten Free, Keto" 
                 placeholderTextColor="#555"
               />
-
-              {/* SECTION 5: HOUSING */}
-              <Text style={styles.sectionHeader}>// BASE OF OPERATIONS</Text>
-              <View style={{ flexDirection: 'row', gap: 10, marginTop: 5 }}>
-                <TouchableOpacity 
-                  onPress={() => handleChange('housing', 'OWN')}
-                  style={[styles.radioBtn, formData.housing === 'OWN' && styles.radioBtnActive]}
-                >
-                  <Text style={[styles.radioText, formData.housing === 'OWN' && {color: '#000'}]}>HOMEOWNER</Text>
-                </TouchableOpacity>
-                <TouchableOpacity 
-                  onPress={() => handleChange('housing', 'RENT')}
-                  style={[styles.radioBtn, formData.housing === 'RENT' && styles.radioBtnActive]}
-                >
-                  <Text style={[styles.radioText, formData.housing === 'RENT' && {color: '#000'}]}>RENTER</Text>
-                </TouchableOpacity>
-              </View>
 
               <View style={{ height: 40 }} />
 
@@ -173,18 +173,11 @@ const styles = StyleSheet.create({
   header: { flexDirection: 'row', justifyContent: 'space-between', padding: 20, borderBottomWidth: 1, borderBottomColor: '#333' },
   headerTitle: { color: '#fff', fontSize: 18, fontFamily: 'Courier', fontWeight: 'bold' },
   closeLink: { color: '#f59e0b', fontSize: 14, fontFamily: 'Courier' },
-  
   form: { padding: 20 },
   sectionHeader: { color: '#00ff00', fontFamily: 'Courier', fontSize: 14, marginTop: 25, marginBottom: 10, fontWeight: 'bold' },
   label: { color: '#888', fontSize: 10, fontFamily: 'Courier', marginBottom: 5, marginTop: 10 },
-  
   input: { backgroundColor: '#252525', color: '#fff', padding: 15, borderRadius: 5, fontSize: 16, borderWidth: 1, borderColor: '#333', fontFamily: 'Courier' },
   row: { flexDirection: 'row' },
-  
-  radioBtn: { padding: 10, borderWidth: 1, borderColor: '#666', borderRadius: 5, flex: 1, alignItems: 'center' },
-  radioBtnActive: { backgroundColor: '#00ff00', borderColor: '#00ff00' },
-  radioText: { color: '#666', fontFamily: 'Courier', fontWeight: 'bold' },
-
   saveButton: { backgroundColor: '#00ff00', padding: 15, borderRadius: 5, alignItems: 'center', marginTop: 30 },
   saveButtonText: { color: '#000', fontWeight: 'bold', fontFamily: 'Courier' }
 });

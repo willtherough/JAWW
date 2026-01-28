@@ -51,9 +51,9 @@ export const loadProfile = async () => {
   try {
     const jsonValue = await AsyncStorage.getItem(KEYS.PROFILE);
     // Default profile if none exists
-    return jsonValue != null ? JSON.parse(jsonValue) : { handle: 'Unknown Operator', id: 'ANON' };
+    return jsonValue != null ? JSON.parse(jsonValue) : null;
   } catch(e) {
-    return { handle: 'Unknown Operator', id: 'ANON' };
+    return null;
   }
 };
 

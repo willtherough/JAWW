@@ -1,72 +1,21 @@
-import { BleManager } from 'react-native-ble-plx';
+import { BleManager, ScanMode } from 'react-native-ble-plx';
 import BLEAdvertiser from 'react-native-ble-advertiser';
-import { PermissionsAndroid, Platform } from 'react-native';
-import { chunkData } from '../utils/Chunker';
-import { Buffer } from 'buffer'; // Ensure you have 'buffer' installed
+import { PermissionsAndroid, Platform, Alert } from 'react-native';
+import { chunkData, reassembleData } from '../utils/Chunker'; // Ensure reassembleData is imported!
+import { decodeBase64, encodeUTF8, decodeUTF8 } from 'tweetnacl-util';
 
-// --- THE CONSTITUTION (CONSTANTS) ---
-// Short 16-bit UUID (Saves 14 bytes of payload space)
-// This is the specific frequency The Source listens on.
-const SOURCE_UUID = '0000CC00-0000-1000-8000-00805F9B34FB';
-
-// The "Hierarchy of Truth" (Anti-Bot Headers)
-export const ORIGIN_STATUS = {
-  VERIFIED: 'VERIFIED',         // Trusted Local (Green Shield)
-  UNVERIFIED: 'UNVERIFIED',     // Stranger (Neutral)
-  KING_OF_BOTS: 'KING_OF_BOTS'  // Known Bot Farm (Red Warning)
-};
-
-// HELPER: Convert String to Byte Array
-const stringToBytes = (str) => {
-  return Array.from(str).map(c => c.charCodeAt(0));
-};
+const SOURCE_UUID = '00001101-0000-1000-8000-00805F9B34FB';
 
 class BluetoothService {
   constructor() {
     this.manager = new BleManager();
-    
-    // Broadcasting State
     this.isBroadcasting = false;
     this.broadcastInterval = null;
+    this.onCardReceivedCallback = null;
     
-    // Scanning & Reassembly State
-    this.scannedPackets = {}; // Store chunks here: { deviceId: [chunk1, chunk2] }
-    this.onCardReceivedCallback = null; // UI Callback
-  }
-
-  // --- UPDATED PROTOCOL LAYER ---
-  // Wraps content in the Constitution and SIGNS it.
-  createPacket(content, identityService) {
-    const timestamp = Date.now();
-    
-    // 1. GET THE KEYS (From the Service)
-    if (!identityService.publicKey) {
-        console.error("Identity not ready!");
-        return null;
-    }
-    const authorPubKey = identityService.publicKey;
-
-    // 2. SIGN THE PAYLOAD
-    // We sign "Content + Timestamp" to prevent hackers from re-playing old messages.
-    const signablePayload = `${content}|${timestamp}`; 
-    const signature = identityService.signMessage(signablePayload);
-
-    const packet = {
-      header: {
-        ver: '1.0',
-        timestamp: timestamp,
-        // The Trapdoor for bots
-        origin_status: ORIGIN_STATUS.UNVERIFIED, 
-      },
-      payload: {
-        id: `card_${timestamp}_${authorPubKey.slice(0,8)}`,
-        content: content,
-        author_pubkey: authorPubKey,
-        signature: signature // <--- REAL CRYPTO PROOF
-      }
-    };
-    
-    return packet;
+    // MEMORY FOR REASSEMBLY
+    this.downloadBuffer = new Set(); // GLOBAL BUFFER: Ignore MAC rotation, collect all valid chunks here.
+    this.readyChunks = null; // PRE-PACKAGING: Store pre-calculated chunks here.
   }
 
   // --- 1. PERMISSIONS ---
@@ -79,16 +28,13 @@ class BluetoothService {
           PermissionsAndroid.PERMISSIONS.BLUETOOTH_ADVERTISE,
           PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION
         ]);
-        const scan = granted[PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN] === PermissionsAndroid.RESULTS.GRANTED;
-        const connect = granted[PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT] === PermissionsAndroid.RESULTS.GRANTED;
-        const advertise = granted[PermissionsAndroid.PERMISSIONS.BLUETOOTH_ADVERTISE] === PermissionsAndroid.RESULTS.GRANTED;
-        return (scan && connect && advertise);
+        return Object.values(granted).every(status => status === PermissionsAndroid.RESULTS.GRANTED);
       } catch (err) { console.warn(err); return false; }
     }
     return true;
   }
 
-  // --- 2. SCANNING (THE RECEIVER) ---
+  // --- 2. SCANNING (THE RADAR) ---
   async startScanning(onCardFound) {
     const hasPerms = await this.requestPermissions();
     if (!hasPerms) return;
@@ -97,17 +43,18 @@ class BluetoothService {
     this.onCardReceivedCallback = onCardFound;
 
     this.manager.startDeviceScan(
-      [SOURCE_UUID], // Only listen to our frequency
-      { allowDuplicates: true }, // Needed to catch rotating chunks
+      [SOURCE_UUID], // <--- RESTORED: Scan specifically for our UUID. Reliable & Fast.
+      { allowDuplicates: true, scanMode: ScanMode.LowLatency }, // TASK 2: AGGRESSIVE SCANNING
       (error, device) => {
         if (error) {
-          if (error.errorCode !== 600) console.log("Scan Error:", error);
+          // Error 600 is Location Services. If you are sure they are on, we ignore the alert.
+          console.log("Scan Error:", error.errorCode, error.message);
           return;
         }
 
-        // If we found a device with data, process it
-        if (device && device.manufacturerData) {
-          this._processSignal(device.manufacturerData, device.id);
+        if (device) {
+           if (device.manufacturerData) console.log(">> RAW HIT:", device.id, device.rssi); // DEBUG: Prove the radio works
+           this._processSignal(device);
         }
       }
     );
@@ -118,118 +65,176 @@ class BluetoothService {
     console.log('>> RADAR: Offline.');
   }
 
-  // --- 3. THE REASSEMBLER (INTERNAL LOGIC) ---
-  _processSignal(base64Data, deviceId) {
+  // --- 3. THE DECODER + STITCHER ---
+  _processSignal(device) {
+    if (!device.manufacturerData) return;
+
     try {
-      // Decode the raw signal from the air
-      const rawString = Buffer.from(base64Data, 'base64').toString('utf8');
-      
-      // LOGIC: Check if it's a full JSON packet or a chunk
-      // (For MVP Phase 5, we assume small packets fit in one go)
-      if (rawString.startsWith('{') && rawString.endsWith('}')) {
-        const card = JSON.parse(rawString);
-        this._handleFullCard(card);
+      // 1. DECODE RAW BYTES
+      const rawBytes = decodeBase64(device.manufacturerData);
+      if (rawBytes.length < 3) return; 
+
+      // Remove Apple ID (The "L")
+      const payloadBytes = rawBytes.subarray(2); 
+      const rawString = encodeUTF8(payloadBytes);
+
+      // 2. CHECK FOR CHUNKS (Format: "1/5|...")
+      // Regex looks for: Number + slash + Number + pipe
+      const chunkMatch = rawString.match(/^(\d+)\/(\d+)\|/);
+
+      if (chunkMatch) {
+          // --- IT IS A PAGE (DATA) ---
+          const totalPackets = parseInt(chunkMatch[2]);
+          
+          // 1. Add to Global Buffer (Ignoring MAC Address)
+          this.downloadBuffer.add(rawString);
+
+          // Calculate Progress
+          const collectedCount = this.downloadBuffer.size;
+          const progress = Math.floor((collectedCount / totalPackets) * 100);
+          
+          // STABLE ID: Use a constant ID for the stream so the Radar doesn't flicker with new dots
+          const STREAM_ID = "TACTICAL_STREAM_V1"; 
+
+          // Attempt Reassembly
+          if (collectedCount >= totalPackets) {
+              const fullContent = reassembleData(Array.from(this.downloadBuffer));
+              if (fullContent) {
+                  try {
+                      const card = JSON.parse(fullContent);
+                      // SUCCESS: WE HAVE THE BOOK!
+                      this.onCardReceivedCallback({
+                          id: STREAM_ID, // Stable ID
+                          // name: "Unknown Operator", // REMOVED: Don't overwrite identity. App.js will handle fallback.
+                          offer: { ...card, title: card.title, author: card.author || (card.genesis && card.genesis.author_id) || 'Unknown' }, // <--- FIX: Pass FULL card data
+                          rssi: device.rssi,
+                          isComplete: true,
+                          _raw: device
+                      });
+                      return; // Done
+                  } catch (e) {
+                      console.log("JSON Parse Failed", e);
+                      console.log(">> RAW PAYLOAD:", fullContent);
+                  }
+              }
+          }
+
+          // SILENCE: Do not report progress. Wait for full reassembly to avoid "Ghost Dots".
       } else {
-        // Placeholder for "Meat Grinder" Reassembly
-        // e.g. "1|3|Part1..." -> Store in this.scannedPackets[deviceId]
-        // console.log(">> CHUNK DETECTED:", rawString);
+          // --- IT IS A NAME (IDENTITY) ---
+          // Clean the string
+          // FILTER NOISE: Only allow printable ASCII. Prevents random devices (headphones) from showing up.
+          if (!/^[\x20-\x7E]+$/.test(rawString)) return;
+
+          this.onCardReceivedCallback({
+              id: device.id,
+              name: rawString, // "Mel"
+              rssi: device.rssi,
+              timestamp: Date.now(),
+              _raw: device
+          });
       }
-    } catch (e) {
-      // Ignore noise
-    }
+
+    } catch (e) { return; }
   }
 
-  _handleFullCard(card) {
-    // 1. VALIDATE: Does it have the Constitution headers?
-    if (!card.header || !card.header.origin_status) {
-      return; // Malformed data
-    }
+  // --- PRE-PACKAGING HELPER ---
+  _generateChunks(identityHandle, packetToBroadcast) {
+    // 1. MINIFY: Strip heavy history to save bandwidth
+    let optimizedPacket = { ...packetToBroadcast, history: [], relayedBy: identityHandle };
+    
+    // 2. SIZE CHECK
+    const jsonString = JSON.stringify(optimizedPacket);
+    const byteSize = encodeUTF8(jsonString).length;
+    const LIMIT = 500; 
 
-    // 2. CHECK VACCINE (Phase 8 Hook):
-    // if (isBotSludge(card.payload.content)) card.header.origin_status = 'KING_OF_BOTS';
-
-    // 3. DELIVER: Send it up to the UI
-    if (this.onCardReceivedCallback) {
-      this.onCardReceivedCallback(card);
+    if (byteSize > LIMIT) {
+        optimizedPacket = {
+            ...optimizedPacket,
+            body: null,
+            body_json: null,
+            is_heavy: true, 
+            note: "Content too large for broadcast. Direct connection required."
+        };
     }
+    return chunkData(JSON.stringify(optimizedPacket));
   }
 
-  // --- 4. BROADCASTING (THE TRANSMITTER) ---
+  // TASK 1: SILENT PRE-PACKAGING (Does NOT start radio)
+  prepareBroadcast(identityHandle, packetToBroadcast) {
+      if (!packetToBroadcast) { this.readyChunks = null; return; }
+      this.readyChunks = this._generateChunks(identityHandle, packetToBroadcast);
+      console.log(`>> PRE-PACKAGING: Ready with ${this.readyChunks.length} chunks.`);
+  }
+
+  // --- 4. BROADCASTING ---
   async startBroadcasting(identityHandle, packetToBroadcast = null) {
     if (this.isBroadcasting) return; 
 
     console.log('>> BROADCAST: Initializing...');
-    
-    BLEAdvertiser.setCompanyId(0x004C); // Apple ID for max compatibility
+    BLEAdvertiser.setCompanyId(0x004C); 
     this.isBroadcasting = true;
 
-    // SCENARIO A: IDENTITY ONLY (Pulse Mode)
-    if (!packetToBroadcast) {
+    // DETERMINE DATA SOURCE
+    let chunks;
+    if (packetToBroadcast) {
+        chunks = this._generateChunks(identityHandle, packetToBroadcast);
+    } else if (this.readyChunks) {
+        chunks = this.readyChunks;
+    }
+
+    // SCENARIO A: IDENTITY MODE
+    if (!chunks) {
       try {
-        console.log(`>> BROADCAST: Identity Mode (${identityHandle})`);
-        await BLEAdvertiser.broadcast(SOURCE_UUID, [12, 34], {
-            advertiseMode: BLEAdvertiser.ADVERTISE_MODE_BALANCED,
+        // TRUNCATE HANDLE: 128-bit UUIDs (16 bytes) + Headers (4 bytes) + Flags (3 bytes) = 23 bytes.
+        // This leaves ~8 bytes. To be safe and avoid "Ghost" bugs, we limit payload to 6 bytes.
+        const payload = Array.from(decodeUTF8(identityHandle.substring(0, 6))); // FIX: Convert Uint8Array to Array
+        await BLEAdvertiser.broadcast(SOURCE_UUID, payload, {
+            advertiseMode: BLEAdvertiser.ADVERTISE_MODE_LOW_LATENCY, // BOOST: Broadcast faster
             txPowerLevel: BLEAdvertiser.ADVERTISE_TX_POWER_HIGH,
             connectable: false,
             includeDeviceName: false,
-            includeTxPowerLevel: false,
-            serviceUUIDs: [SOURCE_UUID]
+            serviceUUIDs: [SOURCE_UUID] // <--- RESTORED: We have room now (12 byte payload + 16 byte UUID fits!)
         });
       } catch (e) { console.log("Broadcast Error:", e); }
       return;
     }
 
-    // SCENARIO B: DATA ROTATION (The Meat Grinder)
-    console.log(`>> BROADCAST: Data Mode (Sending Knowledge Card)`);
+    // SCENARIO B: DATA MODE
+    console.log(`>> BROADCAST: Data Mode (${chunks.length} chunks)`);
     
-    const cardString = JSON.stringify(packetToBroadcast);
-    const chunks = chunkData(cardString);
-    console.log(`>> CHUNKER: Loaded ${chunks.length} packets.`);
 
     let index = 0;
-
-    // The Pulse: Change packets every 350ms
     this.broadcastInterval = setInterval(async () => {
-        if (!this.isBroadcasting) {
-            clearInterval(this.broadcastInterval);
-            return;
-        }
+        if (!this.isBroadcasting) { clearInterval(this.broadcastInterval); return; }
 
         const chunk = chunks[index];
-        const payloadBytes = stringToBytes(chunk);
+        const payloadBytes = Array.from(decodeUTF8(chunk)); // FIX: Convert Uint8Array to Array
 
-        // Stop the previous packet to refresh the payload
         try { await BLEAdvertiser.stopBroadcast(); } catch (e) {}
 
-        // Broadcast the new packet
         try {
             await BLEAdvertiser.broadcast(SOURCE_UUID, payloadBytes, {
                 advertiseMode: BLEAdvertiser.ADVERTISE_MODE_LOW_LATENCY,
                 txPowerLevel: BLEAdvertiser.ADVERTISE_TX_POWER_HIGH,
                 connectable: false,
-                includeDeviceName: false,
-                includeTxPowerLevel: false,
-                serviceUUIDs: [SOURCE_UUID]
+                includeDeviceName: false, 
+                serviceUUIDs: [SOURCE_UUID] // <--- RESTORED
             });
-            if (index === 0) console.log(`>> TX LOOP: Restarting Cycle...`);
         } catch (e) {
-            console.log(">> TX FAILED:", e);
+             if (!e.toString().includes("31 bytes")) console.log(">> TX FAILED:", e);
         }
 
         index = (index + 1) % chunks.length; 
-    }, 350); 
+    }, 40); // TASK 3: FLOOD MODE (40ms)
   }
 
   async stopBroadcasting() {
     this.isBroadcasting = false;
+    this.downloadBuffer.clear(); // Clear memory
     if (this.broadcastInterval) clearInterval(this.broadcastInterval);
-    
-    try {
-      await BLEAdvertiser.stopBroadcast();
-      console.log('>> BROADCAST: OFFLINE.');
-    } catch (error) { 
-        console.log('>> STOP STATUS:', error); 
-    }
+    try { await BLEAdvertiser.stopBroadcast(); } catch (e) {}
+    console.log('>> BROADCAST: OFFLINE.');
   }
 }
 

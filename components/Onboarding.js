@@ -120,7 +120,7 @@ export default function Onboarding({ visible, onComplete, initialData }) {
   // --- RENDER 2: WIZARD FLOW (New Users) ---
   return (
     <Modal visible={visible} animationType="fade">
-      <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} style={styles.container}>
+      <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={styles.container}>
         
         {/* STEP 0: MISSION STATEMENT (RESTORED) */}
         {step === 0 && (

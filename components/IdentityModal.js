@@ -1,230 +1,231 @@
-import React, { useState } from 'react';
-import { View, Text, Modal, TouchableOpacity, StyleSheet, Alert, Clipboard, TextInput } from 'react-native';
+import React, { useState, useEffect } from 'react';
+import { Modal, View, Text, TextInput, TouchableOpacity, StyleSheet, ScrollView, Alert, SafeAreaView, Clipboard } from 'react-native';
+import QRCode from 'react-native-qrcode-svg'; // KEEPING YOUR QR LIBRARY
 
-// NOTE: We rely on the parent (App.js) to handle the actual wiping via onReset
-export default function IdentityModal({ visible, onClose, profile, library, onMerge, onSaveNew, onReset }) {
-  const [mode, setMode] = useState('view'); // 'view', 'export', 'import'
-  const [showSensitive, setShowSensitive] = useState(false);
-  const [importData, setImportData] = useState('');
+export default function IdentityModal({ visible, onClose, profile, library, onReset }) {
+  // SAFEGUARD: Ensure bio exists, even if profile is new
+  const safeBio = profile.bio || {};
+  
+  const [mode, setMode] = useState('view'); // 'view' or 'broadcast'
+  const [isEditing, setIsEditing] = useState(false);
+  
+  // FORM STATE
+  const [handle, setHandle] = useState(profile.handle || '');
+  const [role, setRole] = useState(safeBio.role || profile.role || '');
+  const [expertise, setExpertise] = useState(safeBio.expertise || '');
+  const [age, setAge] = useState(safeBio.age || '');
+  const [height, setHeight] = useState(safeBio.height || '');
+  const [weight, setWeight] = useState(safeBio.weight || '');
 
-  // RESET STATE ON OPEN
-  React.useEffect(() => {
+  // SYNC STATE ON OPEN
+  useEffect(() => {
     if (visible) {
+      setHandle(profile.handle || '');
+      setRole(safeBio.role || profile.role || '');
+      setExpertise(safeBio.expertise || '');
+      setAge(safeBio.age || '');
+      setHeight(safeBio.height || '');
+      setWeight(safeBio.weight || '');
       setMode('view');
-      setShowSensitive(false);
-      setImportData('');
+      setIsEditing(false);
     }
-  }, [visible]);
+  }, [visible, profile]);
+
+  const handleSave = () => {
+    // 1. Update the profile object in memory (so QR code updates instantly)
+    profile.handle = handle;
+    profile.role = role;
+    profile.bio = { role, expertise, age, height, weight };
+    
+    // 2. Notify User
+    Alert.alert("Dossier Updated", "Identity records patched locally.");
+    setIsEditing(false);
+  };
 
   const copyPrivate = () => {
-    if (profile.keys) {
-      Clipboard.setString(profile.keys.secretKey);
-      Alert.alert("Copied", "Identity Key copied to clipboard.");
+    if (profile.publicKey) {
+      Clipboard.setString(profile.publicKey);
+      Alert.alert("Copied", "Public Key copied to clipboard.");
     }
   };
 
-  const copyFullBackup = () => {
-    // BUNDLE EVERYTHING
-    const backup = {
-      profile: profile,
-      library: library || [],
-      timestamp: new Date().toISOString(),
-      version: '1.5'
-    };
-    
-    const json = JSON.stringify(backup);
-    Clipboard.setString(json);
-    Alert.alert("Archive Secured", `Full System Backup (${(json.length / 1024).toFixed(1)} KB) copied to clipboard.`);
-  };
-
-  const handleImportSubmit = () => {
-    if (!importData) return;
-    const success = onMerge(importData);
-    if (success) {
-        setImportData('');
-        onClose();
-    }
-  };
-
-  const handleFactoryReset = async () => {
-    Alert.alert(
-      "FACTORY RESET",
-      "This will wipe ALL data and return you to the Welcome Screen. This action cannot be undone.",
-      [
-        { text: "Cancel", style: "cancel" },
-        { 
-          text: "WIPE EVERYTHING", 
-          style: 'destructive',
-          onPress: () => {
-             // CALL PARENT WIPE FUNCTION (Instant Reset)
-             if (onReset) onReset(); 
-          }
-        }
-      ]
-    );
-  };
+  if (!visible) return null;
 
   return (
-    <Modal visible={visible} animationType="slide" transparent>
-      <View style={styles.overlay}>
-        <View style={styles.container}>
+    <Modal visible={visible} animationType="slide">
+      <View style={styles.container}>
+        <SafeAreaView style={{flex: 1}}>
           
-          {/* HEADER */}
-          <Text style={styles.header}>ACCOUNT MANAGEMENT</Text>
+          <View style={styles.header}>
+            <Text style={styles.title}>OPERATOR IDENTITY</Text>
+            <TouchableOpacity onPress={onClose}><Text style={styles.closeText}>CLOSE</Text></TouchableOpacity>
+          </View>
 
-          {/* --- VIEW MODE (DEFAULT) --- */}
-          {mode === 'view' && (
-            <View>
-              <Text style={styles.label}>OPERATOR STATUS:</Text>
-              <View style={styles.statusBox}>
-                <Text style={styles.value}>{profile.handle ? profile.handle.toUpperCase() : 'UNKNOWN'}</Text>
-                <Text style={styles.smallCode}>{library ? library.length : 0} RECORDS SECURED</Text>
+          <ScrollView contentContainerStyle={{padding: 20}}>
+            
+            {/* ID CARD HEADER */}
+            <View style={styles.idCard}>
+              <View style={styles.avatar}>
+                <Text style={styles.avatarText}>{handle.substring(0,2).toUpperCase()}</Text>
               </View>
-              
-              <View style={styles.menuStack}>
-                
-                {/* 1. EDIT IDENTITY (RESTORED) */}
-                <TouchableOpacity onPress={() => { onClose(); onSaveNew(); }} style={styles.btnSecondary}>
-                   <Text style={styles.btnTextWhite}>📝 EDIT BACKGROUND / DOSSIER</Text>
-                </TouchableOpacity>
-
-                {/* 2. TRANSFER / BACKUP */}
-                <TouchableOpacity onPress={() => setMode('export')} style={styles.btnPrimary}>
-                  <Text style={styles.btnTextBlack}>📤 EXPORT / BACKUP DATA</Text>
-                </TouchableOpacity>
-
-                {/* 3. RECEIVE / MERGE */}
-                <TouchableOpacity onPress={() => setMode('import')} style={styles.btnSecondary}>
-                  <Text style={styles.btnTextWhite}>📥 IMPORT / RECEIVE DATA</Text>
-                </TouchableOpacity>
-
-                <View style={styles.divider} />
-
-                {/* 4. FACTORY RESET */}
-                <TouchableOpacity onPress={handleFactoryReset} style={styles.btnDestructive}>
-                  <Text style={styles.btnTextDestructive}>☢️ FACTORY RESET (DEV)</Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity onPress={onClose} style={styles.btnClose}>
-                  <Text style={styles.btnTextGray}>CLOSE</Text>
-                </TouchableOpacity>
+              <View>
+                <Text style={styles.handle}>{handle.toUpperCase()}</Text>
+                <Text style={styles.key}>{profile.publicKey ? profile.publicKey.substring(0, 15) + '...' : 'NO KEY'}</Text>
+                <Text style={styles.role}>{role ? role.toUpperCase() : 'OBSERVER CLASS'}</Text>
               </View>
             </View>
-          )}
 
-          {/* --- EXPORT MODE --- */}
-          {mode === 'export' && (
-            <View>
-              <Text style={styles.warningText}>DATA EXPORT PROTOCOL</Text>
-              <Text style={styles.infoText}>Select the depth of your backup:</Text>
-
-              {/* A. FULL BACKUP */}
-              <TouchableOpacity onPress={copyFullBackup} style={styles.btnBigGreen}>
-                <Text style={styles.btnTextBlack}>COPY FULL ARCHIVE</Text>
-                <Text style={styles.btnSubText}>Identity + All Knowledge Cards</Text>
-              </TouchableOpacity>
-
-              {/* B. KEYS ONLY */}
-              <View style={styles.keySection}>
-                <Text style={styles.label}>IDENTITY ONLY (PRIVATE KEY)</Text>
-                {!showSensitive ? (
-                    <TouchableOpacity onPress={() => setShowSensitive(true)} style={styles.revealBtn}>
-                    <Text style={styles.revealText}>REVEAL KEY</Text>
+            {/* MODE SWITCHER */}
+            {mode === 'view' ? (
+              <>
+                {/* DOSSIER SECTION */}
+                <View style={styles.section}>
+                  <View style={{flexDirection:'row', justifyContent:'space-between', alignItems:'center'}}>
+                    <Text style={styles.sectionTitle}>// DOSSIER</Text>
+                    <TouchableOpacity onPress={() => setIsEditing(!isEditing)}>
+                      <Text style={{color:'#f59e0b', fontWeight:'bold'}}>{isEditing ? 'CANCEL EDIT' : 'EDIT RECORDS'}</Text>
                     </TouchableOpacity>
-                ) : (
-                    <TouchableOpacity onPress={copyPrivate} style={styles.secretBox}>
-                        <Text style={styles.secretCode}>{profile.keys?.secretKey.substring(0, 30)}...</Text>
-                        <Text style={styles.copyLabel}>TAP TO COPY</Text>
-                    </TouchableOpacity>
-                )}
+                  </View>
+                  
+                  {isEditing ? (
+                    <View style={styles.form}>
+                      <Text style={styles.label}>HANDLE (CODENAME)</Text>
+                      <TextInput style={styles.input} value={handle} onChangeText={setHandle} placeholder="Codename" placeholderTextColor="#555"/>
+                      
+                      <Text style={styles.label}>PRIMARY ROLE</Text>
+                      <TextInput style={styles.input} value={role} onChangeText={setRole} placeholder="e.g. SCOUT" placeholderTextColor="#555"/>
+                      
+                      <Text style={styles.label}>EXPERTISE</Text>
+                      <TextInput style={styles.input} value={expertise} onChangeText={setExpertise} placeholder="e.g. MEDICAL, COMMS" placeholderTextColor="#555"/>
+                      
+                      <View style={{flexDirection:'row', gap: 10}}>
+                        <View style={{flex:1}}>
+                            <Text style={styles.label}>AGE</Text>
+                            <TextInput style={styles.input} value={age} onChangeText={setAge} keyboardType="numeric"/>
+                        </View>
+                        <View style={{flex:1}}>
+                            <Text style={styles.label}>HGT</Text>
+                            <TextInput style={styles.input} value={height} onChangeText={setHeight} />
+                        </View>
+                        <View style={{flex:1}}>
+                            <Text style={styles.label}>WGT</Text>
+                            <TextInput style={styles.input} value={weight} onChangeText={setWeight} keyboardType="numeric"/>
+                        </View>
+                      </View>
+
+                      <TouchableOpacity onPress={handleSave} style={styles.saveBtn}>
+                        <Text style={styles.saveText}>SAVE RECORDS</Text>
+                      </TouchableOpacity>
+                    </View>
+                  ) : (
+                    <View style={styles.statsGrid}>
+                      <View style={styles.statBox}>
+                        <Text style={styles.statLabel}>EXPERTISE</Text>
+                        <Text style={styles.statVal}>{expertise || 'NONE LISTED'}</Text>
+                      </View>
+                      <View style={styles.statBox}>
+                        <Text style={styles.statLabel}>PHYSICAL</Text>
+                        <Text style={styles.statVal}>
+                          {age ? `${age}yrs` : '--'} / {height || '--'} / {weight ? `${weight}lbs` : '--'}
+                        </Text>
+                      </View>
+                    </View>
+                  )}
+                </View>
+
+                {/* ACTION BUTTONS */}
+                <TouchableOpacity onPress={() => setMode('broadcast')} style={styles.broadcastBtn}>
+                  <Text style={styles.broadcastText}>📡 BROADCAST IDENTITY (QR)</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity onPress={copyPrivate} style={styles.secondaryBtn}>
+                  <Text style={styles.secondaryText}>COPY PUBLIC KEY</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity onPress={onReset} style={{marginTop: 30, padding: 15, alignItems:'center'}}>
+                  <Text style={{color:'#330000', fontSize: 10, fontWeight:'bold'}}>⚠ FACTORY RESET IDENTITY</Text>
+                </TouchableOpacity>
+              </>
+            ) : (
+              // BROADCAST MODE
+              <View style={{alignItems:'center', marginTop: 20}}>
+                <View style={{backgroundColor:'#fff', padding:15, borderRadius:10}}>
+                  <QRCode 
+                    value={JSON.stringify({
+                      type: 'SOURCE_IDENTITY_V1',
+                      id: profile.publicKey,
+                      payload: {
+                        handle: handle,
+                        role: role,
+                        bio: { age, expertise, height, weight, role } // <--- THE DATA YOU JUST EDITED
+                      }
+                    })} 
+                    size={250}
+                  />
+                </View>
+                <Text style={{color:'#00ff00', marginTop:20, fontWeight:'bold'}}>BEACON ACTIVE</Text>
+                <Text style={{color:'#666', textAlign:'center', marginTop:10, marginBottom:30}}>
+                  Scan this with another device to transfer your new Dossier.
+                </Text>
+                <TouchableOpacity onPress={() => setMode('view')} style={styles.secondaryBtn}>
+                  <Text style={styles.secondaryText}>STOP BROADCAST</Text>
+                </TouchableOpacity>
               </View>
+            )}
 
-              <TouchableOpacity onPress={() => setMode('view')} style={styles.btnSecondary}>
-                <Text style={styles.btnTextWhite}>BACK</Text>
-              </TouchableOpacity>
-            </View>
-          )}
-
-          {/* --- IMPORT MODE (DEBUG VERSION) --- */}
-          {mode === 'import' && (
-            <View>
-              <Text style={styles.warningText}>DATA INGESTION</Text>
-              
-              <Text style={styles.infoText}>
-                Paste your backup string below.
-              </Text>
-
-              {/* FUEL GAUGE: SHOWS DATA LENGTH */}
-              <Text style={{color: importData.length > 50 ? '#00ff00' : '#ff5555', fontSize: 10, marginBottom: 5, fontWeight:'bold', textAlign:'right'}}>
-                 PAYLOAD SIZE: {importData.length} CHARS
-              </Text>
-
-              <TextInput 
-                style={styles.pasteArea}
-                placeholder="Paste JSON string here..."
-                placeholderTextColor="#555"
-                multiline
-                value={importData}
-                onChangeText={setImportData}
-                autoCorrect={false}
-                autoCapitalize="none"
-                spellCheck={false}
-                smartQuotesType="no"
-              />
-
-              <TouchableOpacity onPress={handleImportSubmit} style={styles.btnPrimary}>
-                <Text style={styles.btnTextBlack}>PROCESS DATA STREAM</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity onPress={() => setMode('view')} style={styles.btnSecondary}>
-                <Text style={styles.btnTextWhite}>BACK</Text>
-              </TouchableOpacity>
-            </View>
-          )}
-
-        </View>
+          </ScrollView>
+        </SafeAreaView>
       </View>
     </Modal>
   );
 }
 
 const styles = StyleSheet.create({
-  overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.9)', justifyContent: 'center', padding: 20 },
-  container: { backgroundColor: '#1e1e1e', borderRadius: 12, padding: 20, borderWidth: 1, borderColor: '#333' },
-  header: { color: '#fff', fontSize: 18, fontWeight: 'bold', marginBottom: 20, textAlign: 'center', letterSpacing: 1 },
+  container: { 
+    flex: 1, 
+    backgroundColor: '#050505',
+    // --- THE FIX ---
+    paddingTop: 60,            // Forces content down (internal spacing)
+    paddingHorizontal: 0,      // Keep edges flush
+    // ----------------
+  },
+  header: { 
+    flexDirection: 'row', 
+    justifyContent: 'space-between', 
+    paddingHorizontal: 20,     // Add side padding to header specifically
+    paddingBottom: 20, 
+    borderBottomWidth: 1, 
+    borderColor: '#222',
+    alignItems: 'center'
+  },
+  title: { color: '#fff', fontWeight: 'bold', fontSize: 16, letterSpacing: 1 },
+  closeText: { color: '#666', fontWeight:'bold', padding: 10 }, // Larger touch target
   
-  statusBox: { marginBottom: 20, padding: 10, backgroundColor: '#111', borderRadius: 8, alignItems: 'center' },
-  label: { color: '#666', fontSize: 10, marginBottom: 5, fontWeight: 'bold' },
-  value: { color: '#00ff00', fontSize: 20, fontWeight: 'bold' },
-  smallCode: { color: '#888', fontSize: 10, fontFamily: 'Courier', marginTop: 5 },
+  // ... rest of your styles (idCard, avatar, etc.) remain exactly the same ...
+  idCard: { flexDirection: 'row', backgroundColor: '#111', padding: 20, borderRadius: 10, marginBottom: 20, marginHorizontal: 20, alignItems: 'center', borderLeftWidth:4, borderColor:'#00ff00' },
+  avatar: { width: 60, height: 60, backgroundColor: '#222', borderRadius: 30, justifyContent: 'center', alignItems: 'center', marginRight: 20 },
+  avatarText: { color: '#fff', fontSize: 24, fontWeight: 'bold' },
+  handle: { color: '#fff', fontSize: 20, fontWeight: 'bold' },
+  key: { color: '#666', fontSize: 10, fontFamily: 'Courier', marginVertical: 2 },
+  role: { color: '#00ff00', fontSize: 12, fontWeight: 'bold' },
   
-  menuStack: { gap: 10 },
-  divider: { height: 1, backgroundColor: '#333', marginVertical: 10 },
+  section: { marginTop: 10, paddingHorizontal: 20 },
+  sectionTitle: { color: '#666', marginBottom: 15, fontSize: 12, fontWeight:'bold' },
   
-  infoText: { color: '#aaa', fontSize: 12, marginBottom: 15, lineHeight: 18 },
-  warningText: { color: '#f59e0b', fontSize: 14, marginBottom: 15, fontWeight: 'bold', textAlign: 'center' },
+  statsGrid: { gap: 10 },
+  statBox: { backgroundColor: '#111', padding: 15, borderRadius: 5 },
+  statLabel: { color: '#666', fontSize: 10, marginBottom: 5 },
+  statVal: { color: '#fff', fontSize: 14, fontWeight: 'bold' },
+  
+  broadcastBtn: { marginTop: 30, marginHorizontal: 20, backgroundColor: '#003300', padding: 20, borderRadius: 10, alignItems: 'center', borderWidth: 1, borderColor: '#00ff00' },
+  broadcastText: { color: '#00ff00', fontWeight: 'bold', letterSpacing: 1 },
+  
+  secondaryBtn: { marginTop: 10, marginHorizontal: 20, backgroundColor: '#222', padding: 15, borderRadius: 10, alignItems: 'center' },
+  secondaryText: { color: '#ccc', fontWeight: 'bold' },
 
-  // EXPORT STYLES
-  btnBigGreen: { backgroundColor: '#00ff00', padding: 20, borderRadius: 8, alignItems: 'center', marginBottom: 20 },
-  keySection: { backgroundColor: '#222', padding: 10, borderRadius: 8, marginBottom: 20 },
-  secretBox: { backgroundColor: '#220000', padding: 10, borderRadius: 8, borderWidth: 1, borderColor: '#f00', alignItems: 'center' },
-  secretCode: { color: '#ff5555', fontSize: 10, fontFamily: 'Courier' },
-  copyLabel: { color: '#fff', fontWeight: 'bold', fontSize: 10, marginTop: 5 },
-  revealBtn: { backgroundColor: '#333', padding: 15, alignItems: 'center', borderRadius: 8 },
-  revealText: { color: '#f59e0b', fontWeight: 'bold', fontSize: 12 },
-
-  // IMPORT STYLES
-  pasteArea: { backgroundColor: '#111', color: '#fff', height: 100, borderRadius: 8, padding: 10, fontFamily: 'Courier', fontSize: 10, marginBottom: 15, borderWidth: 1, borderColor: '#333' },
-
-  // BUTTONS
-  btnPrimary: { backgroundColor: '#00ff00', padding: 15, borderRadius: 5, alignItems: 'center' },
-  btnDestructive: { backgroundColor: '#330000', padding: 15, borderRadius: 5, alignItems: 'center', borderWidth: 1, borderColor: '#ff0000' },
-  btnSecondary: { backgroundColor: '#333', padding: 15, borderRadius: 5, alignItems: 'center', marginTop: 10 },
-  btnClose: { padding: 15, alignItems: 'center', marginTop: 5 },
-
-  btnTextBlack: { color: '#000', fontWeight: 'bold' },
-  btnTextWhite: { color: '#fff', fontWeight: 'bold' },
-  btnTextDestructive: { color: '#ff5555', fontWeight: 'bold' },
-  btnTextGray: { color: '#888' },
-  btnSubText: { color: '#004400', fontSize: 10, marginTop: 2, fontWeight: 'bold' }
+  form: { backgroundColor: '#111', padding: 15, borderRadius: 5 },
+  label: { color: '#666', fontSize: 10, marginBottom: 5, marginTop: 10 },
+  input: { backgroundColor: '#222', color: '#fff', padding: 12, borderRadius: 5, borderWidth: 1, borderColor: '#333', fontWeight:'bold' },
+  saveBtn: { backgroundColor: '#f59e0b', padding: 15, borderRadius: 5, marginTop: 20, alignItems: 'center' },
+  saveText: { color: '#000', fontWeight: 'bold' }
 });
