@@ -31,7 +31,7 @@ export const calculateInterestScore = (card, userInterests = []) => {
 };
 
 // --- 4. REPUTATION ENGINE (The "Digital Immune System") ---
-export const calculateTrustScore = (card, userNetwork = [], userInterests = []) => {
+export const calculateTrustScore = (card, userNetwork = [], userInterests = [], rssi) => {
   if (card.safety && card.safety.flag_count > 5) return 0;
 
   let score = 0;
@@ -43,7 +43,11 @@ export const calculateTrustScore = (card, userNetwork = [], userInterests = []) 
   const contextMultiplier = (card.fork_depth || 0) > 0 ? 1.5 : 1.0;
   const interestMultiplier = calculateInterestScore(card, userInterests);
 
-  const finalScore = score * contextMultiplier * interestMultiplier;
+  const baseScore = score * contextMultiplier * interestMultiplier;
+
+  // --- Physics-Based Reputation (Claim 5) ---
+  const denominator = Math.max(Math.abs(rssi || -75), 1); // Ensure divisor is at least 1
+  const finalScore = baseScore / denominator;
 
   const ageInHours = (Date.now() - (card.genesis ? new Date(card.genesis.timestamp).getTime() : Date.now())) / 36e5;
   const velocityCap = ageInHours < 24 ? 50 : 5000;
@@ -52,7 +56,7 @@ export const calculateTrustScore = (card, userNetwork = [], userInterests = []) 
 };
 
 // --- 5. THE CARD CONSTRUCTOR ---
-export const createCard = async (authorId, title, body, path, type = 'standard') => {
+export const createCard = async (authorId, title, body, topicPath, type = 'standard') => {
   const timestamp = new Date().toISOString();
   const contentString = title + body;
   const contentHash = await Crypto.digestStringAsync(
@@ -70,7 +74,8 @@ export const createCard = async (authorId, title, body, path, type = 'standard')
     type: type, 
     title: title,
     body: body,
-    path: path, 
+    topic: topicPath,
+    path: topicPath, 
     hash: contentHash,
     genesis: {
       author_id: authorId,
@@ -86,7 +91,7 @@ export const createCard = async (authorId, title, body, path, type = 'standard')
     history: [
       {
         action: 'CREATED',
-        user_id: authorId,
+        user: authorId,
         timestamp: timestamp,
         note: 'Original Entry'
       }
@@ -128,5 +133,72 @@ export const createIdentityCard = (profile, publicKey) => {
       vouch_count: 0,
       verified_status: false
     }
+  };
+};
+
+// --- 7. KNOWLEDGE FORK ---
+export const forkCard = async (originalCard, contextNote, userProfile) => {
+  const timestamp = new Date().toISOString();
+  const newId = Crypto.randomUUID();
+
+  // The new content hash should include the new context to make it unique
+  const contentString = originalCard.title + originalCard.body + contextNote;
+  const contentHash = await Crypto.digestStringAsync(
+    Crypto.CryptoDigestAlgorithm.SHA256,
+    contentString
+  );
+
+  if (BANNED_HASHES.includes(contentHash)) {
+    throw new Error("Content flagged as prohibited by safety protocol.");
+  }
+
+  // Deep copy history and add the FORK event
+  const newHistory = JSON.parse(JSON.stringify(originalCard.history || []));
+  newHistory.push({
+    action: 'FORK',
+    user: userProfile.handle,
+    timestamp: timestamp,
+    note: contextNote,
+  });
+
+  return {
+    id: newId,
+    version: CARD_VERSION,
+    type: originalCard.type,
+    title: originalCard.title,
+    body: originalCard.body, // Original body is preserved
+    contextNote: contextNote, // New field for the operator's log
+    topic: originalCard.topic,
+    subject: originalCard.subject,
+    path: originalCard.path,
+    hash: contentHash,
+    
+    forkedFrom: originalCard.id, // Track lineage
+    fork_depth: (originalCard.fork_depth || 0) + 1,
+
+    genesis: {
+      author_id: userProfile.handle, // The forker is the new author
+      timestamp: timestamp,
+      signature: null, // To be signed by the forker
+      location_fuzzed: null
+    },
+    
+    safety: {
+      flag_count: 0,
+      last_flagged: null,
+      min_app_version: "1.0"
+    },
+    
+    history: newHistory,
+    endorsements: [], // Endorsements don't carry over
+    
+    commercial: {
+      is_for_sale: false,
+      price: 0,
+      currency: 'USDC',
+      owner_wallet: null
+    },
+
+    hops: 0, // A forked card starts a new journey
   };
 };

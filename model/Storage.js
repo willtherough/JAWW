@@ -3,10 +3,22 @@
 // Handles storage, retrieval, and the new Taxonomy logic.
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { insertTrustedSource, fetchTrustedSources } from './database';
 
 const KEYS = {
   LIBRARY: 'THE_SOURCE_LIBRARY_V2',
   PROFILE: 'THE_SOURCE_PROFILE_V2'
+};
+
+// --- TRUSTED SOURCES (SQLite) ---
+
+export const saveTrustedSource = (source) => {
+  // The `source` object should contain { uid, handle, publicKey, timestamp }
+  return insertTrustedSource(source);
+};
+
+export const loadTrustedSources = () => {
+  return fetchTrustedSources();
 };
 
 // --- LIBRARY MANAGEMENT ---

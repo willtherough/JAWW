@@ -6,7 +6,6 @@ export default function TrustedSourcesModal({ visible, onClose, sources, onAddSo
 
   // --- RENDER: THE LIST ROW (Summary) ---
   const renderSourceItem = ({ item }) => {
-    // Robust Check: Handle root level props OR nested payload props
     const handle = item.handle || item.payload?.handle || 'Unknown Operator';
     const role = item.role || item.bio?.role || 'Observer';
     const hasClaims = (item.role || item.bio?.role);
@@ -38,7 +37,7 @@ export default function TrustedSourcesModal({ visible, onClose, sources, onAddSo
     const s = selectedSource;
     if (!s) return null;
 
-    const handle = s.handle || 'Unknown';
+    const handle = s.handle || s.payload?.handle || 'Unknown';
     const role = s.role || s.bio?.role || 'None';
     const history = s.history || [];
 
@@ -62,7 +61,7 @@ export default function TrustedSourcesModal({ visible, onClose, sources, onAddSo
                <Text style={styles.stat}>HGT: {s.bio?.height || '--'}</Text>
                <Text style={styles.stat}>EXP: {s.bio?.expertise || 'None Listed'}</Text>
              </View>
-             <Text style={styles.keyText}>ID: {s.id ? s.id.substring(0, 15) : '???'}...</Text>
+             <Text style={styles.keyText}>ID: {s.uid ? s.uid.substring(0, 15) : '???'}...</Text>
           </View>
 
           {/* 2. THE CHAIN OF CUSTODY (History) */}
@@ -111,7 +110,7 @@ export default function TrustedSourcesModal({ visible, onClose, sources, onAddSo
 
               <FlatList
                 data={sources}
-                keyExtractor={item => item.id || Math.random().toString()}
+                keyExtractor={item => item.uid}
                 renderItem={renderSourceItem}
                 contentContainerStyle={{ padding: 20 }}
                 ListEmptyComponent={

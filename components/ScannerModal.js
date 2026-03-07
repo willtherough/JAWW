@@ -1,131 +1,198 @@
 import React, { useState, useEffect } from 'react';
-import { Modal, View, Text, StyleSheet, TouchableOpacity, Alert, Vibration } from 'react-native'; 
+import { Modal, View, Text, StyleSheet, Vibration, TouchableOpacity } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
-import * as ImagePicker from 'expo-image-picker'; 
-// import RNQRGenerator from 'rn-qr-generator'; // Keeping this if you have it installed, otherwise comment out
 
 export default function ScannerModal({ visible, onClose, onScanSuccess }) {
   const [permission, requestPermission] = useCameraPermissions();
-  const [scanned, setScanned] = useState(false);
-  const [torchOn, setTorchOn] = useState(false); 
+  const [isScanning, setIsScanning] = useState(true);
 
   useEffect(() => {
+    if (visible && !permission?.granted) {
+      requestPermission();
+    }
+    // When the modal becomes visible, make sure scanning is active
     if (visible) {
-      setScanned(false);
-      if (!permission) requestPermission();
+      setIsScanning(true);
     }
-  }, [visible]);
+  }, [visible, permission]);
 
-  const handlePickFromGallery = async () => {
-    try {
-      const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ImagePicker.MediaTypeOptions.Images,
-        allowsEditing: false, 
-        quality: 1,
-      });
-
-      if (!result.canceled && result.assets && result.assets.length > 0) {
-        Alert.alert("Notice", "Gallery scan logic preserved (requires RNQRGenerator).");
-        // Logic preserved from your code:
-        /*
-        const imageUri = result.assets[0].uri;
-        RNQRGenerator.detect({ uri: imageUri })
-        .then(response => {
-          const { values } = response;
-          if (values && values.length > 0) handleBarCodeScanned({ data: values[0] });
-          else Alert.alert("Scan Failed", "No QR code found.");
-        })
-        .catch(err => Alert.alert("Error", "Could not read image."));
-        */
-      }
-    } catch (e) {
-      console.log(e);
-    }
-  };
-
-  if (!permission?.granted) return null;
-
-  const handleBarCodeScanned = ({ data }) => {
-    if (scanned) return;
-    setScanned(true);
-    Vibration.vibrate();
-
-    try {
-      // 1. TRY PARSE
-      const cardData = typeof data === 'string' ? JSON.parse(data) : data;
-      console.log("Auditing Card:", cardData.title);
-
-      // 2. CHECK TYPE (Is it an identity?)
-      if (cardData.type === 'SOURCE_IDENTITY_V1') {
-         onScanSuccess(data); // Pass raw string or object depending on what App.js expects
-         return;
-      }
-
-      // 3. AUDIT KNOWLEDGE CARDS
-      if (!cardData.history || cardData.history.length === 0) {
-        Alert.alert("Security Alert", "No Chain of Custody found.", [{ text: "OK", onPress: () => setScanned(false) }]);
-        return;
-      }
-      
-      // 4. SUCCESS
+  const handleBarCodeScanned = ({ type, data }) => {
+    if (isScanning) {
+      setIsScanning(false); // Pause scanning
+      Vibration.vibrate(100);
       onScanSuccess(data);
-
-    } catch (error) {
-      // If it's not JSON, it might be a raw URL or just garbage
-      Alert.alert("Read Error", "Not a valid Source Card.", [{ text: "OK", onPress: () => setScanned(false) }]);
+      // Automatically close the modal and reset after a short delay
+      setTimeout(() => {
+        onClose();
+      }, 500);
     }
   };
 
-  return (
-    <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
-      <View style={styles.container}>
-        {/* FIX: Use absoluteFillObject so the camera actually shows up */}
-        <CameraView
-          style={StyleSheet.absoluteFillObject}
-          facing="back"
-          enableTorch={torchOn} // FIX: Actually link the state to the camera
-          onBarcodeScanned={scanned ? undefined : handleBarCodeScanned}
-          barcodeScannerSettings={{ barcodeTypes: ["qr"] }}
-        />
-        
+  if (!permission) {
+    return <View />; // Or a loading indicator
+  }
+
+  if (!permission.granted) {
+    return (
+      <Modal visible={visible} transparent animationType="fade">
         <View style={styles.overlay}>
-          <View style={styles.reticle} />
-          <View style={styles.statusBadge}>
-            <Text style={styles.statusText}>
-                {scanned ? "ANALYZING..." : "SEARCHING FOR SIGNATURE..."}
-            </Text>
+          <View style={styles.alertBox}>
+            <Text style={styles.warningText}>Camera permission is required to use the scanner.</Text>
+            <TouchableOpacity onPress={requestPermission} style={styles.btnApprove}>
+              <Text style={styles.btnTextBlack}>GRANT PERMISSION</Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={onClose} style={styles.btnDeny}>
+              <Text style={styles.btnTextRed}>CANCEL</Text>
+            </TouchableOpacity>
           </View>
         </View>
+      </Modal>
+    );
+  }
 
-        <View style={styles.controlsContainer}>
-          <TouchableOpacity style={[styles.controlBtn, {backgroundColor: torchOn ? '#f59e0b' : '#333'}]} onPress={() => setTorchOn(!torchOn)}>
-            <Text style={{fontSize:20}}>🔦</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity style={styles.galleryBtn} onPress={handlePickFromGallery}>
-            <Text style={styles.galleryText}>📂 UPLOAD IMAGE</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity style={styles.closeBtn} onPress={onClose}>
-            <Text style={styles.closeText}>X</Text>
-          </TouchableOpacity>
+  return (
+    <Modal
+      visible={visible}
+      transparent
+      animationType="fade"
+      onRequestClose={onClose}
+    >
+      <View style={styles.overlay}>
+        <Text style={styles.headerTitle}>SCAN TARGET</Text>
+        <View style={styles.cameraContainer}>
+          <CameraView
+            style={StyleSheet.absoluteFillObject}
+            onBarcodeScanned={isScanning ? handleBarCodeScanned : undefined}
+            barcodeScannerSettings={{
+              barcodeTypes: ["qr"],
+            }}
+          />
+          {/* Green Corners Overlay */}
+          <View style={styles.cornersOverlay}>
+            <View style={[styles.corner, styles.topLeft]} />
+            <View style={[styles.corner, styles.topRight]} />
+            <View style={[styles.corner, styles.bottomLeft]} />
+            <View style={[styles.corner, styles.bottomRight]} />
+          </View>
         </View>
-
+        <TouchableOpacity onPress={onClose} style={styles.closeButton}>
+          <Text style={styles.closeButtonText}>CANCEL</Text>
+        </TouchableOpacity>
       </View>
     </Modal>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: 'black' },
-  overlay: { flex: 1, justifyContent: 'center', alignItems: 'center' },
-  reticle: { width: 250, height: 250, borderWidth: 2, borderColor: '#00ff00', backgroundColor: 'transparent' },
-  statusBadge: { marginTop: 20, backgroundColor:'rgba(0,0,0,0.7)', padding: 10, borderRadius: 5 },
-  statusText: { color: '#00ff00', fontFamily: 'Courier', fontWeight: 'bold' },
-  controlsContainer: { position: 'absolute', bottom: 40, width: '100%', flexDirection:'row', justifyContent:'center', alignItems: 'center', gap: 15 },
-  galleryBtn: { backgroundColor: '#ffffff', paddingVertical: 12, paddingHorizontal: 20, borderRadius: 5, borderWidth: 1, borderColor: '#ccc', alignItems: 'center' },
-  galleryText: { color: 'black', fontWeight: 'bold', fontFamily: 'Courier' },
-  controlBtn: { width: 50, height: 50, borderRadius: 25, justifyContent:'center', alignItems:'center', borderWidth:1, borderColor:'#fff' },
-  closeBtn: { backgroundColor: '#330000', width: 50, height: 50, borderRadius: 25, borderWidth: 1, borderColor: 'red', justifyContent:'center', alignItems: 'center' },
-  closeText: { color: 'red', fontWeight: 'bold', fontSize: 18 }
+  overlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.9)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  headerTitle: {
+    color: '#00ff00',
+    fontFamily: 'Courier',
+    fontSize: 20,
+    fontWeight: 'bold',
+    letterSpacing: 2,
+    marginBottom: 20,
+    textTransform: 'uppercase',
+  },
+  cameraContainer: {
+    width: '80%',
+    aspectRatio: 1,
+    backgroundColor: 'black',
+    borderRadius: 10,
+    overflow: 'hidden',
+    borderWidth: 2,
+    borderColor: '#00ff00',
+    position: 'relative',
+  },
+  cornersOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    justifyContent: 'space-between',
+  },
+  corner: {
+    position: 'absolute',
+    width: 40,
+    height: 40,
+    borderColor: '#00ff00',
+  },
+  topLeft: {
+    top: -2,
+    left: -2,
+    borderTopWidth: 5,
+    borderLeftWidth: 5,
+  },
+  topRight: {
+    top: -2,
+    right: -2,
+    borderTopWidth: 5,
+    borderRightWidth: 5,
+  },
+  bottomLeft: {
+    bottom: -2,
+    left: -2,
+    borderBottomWidth: 5,
+    borderLeftWidth: 5,
+  },
+  bottomRight: {
+    bottom: -2,
+    right: -2,
+    borderBottomWidth: 5,
+    borderRightWidth: 5,
+  },
+  closeButton: {
+    marginTop: 30,
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+    borderWidth: 1,
+    borderColor: '#666',
+    borderRadius: 5,
+  },
+  closeButtonText: {
+    color: '#666',
+    fontWeight: 'bold',
+    fontFamily: 'Courier',
+  },
+  alertBox: {
+    width: '85%',
+    backgroundColor: '#000',
+    borderWidth: 2,
+    borderColor: '#f59e0b',
+    borderRadius: 10,
+    padding: 20,
+    alignItems: 'center',
+  },
+  warningText: {
+    color: '#f59e0b',
+    textAlign: 'center',
+    marginBottom: 20,
+    fontSize: 14,
+  },
+  btnApprove: {
+    width: '100%',
+    padding: 15,
+    backgroundColor: '#f59e0b',
+    borderRadius: 5,
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  btnDeny: {
+    width: '100%',
+    padding: 15,
+    borderWidth: 1,
+    borderColor: '#ff0000',
+    borderRadius: 5,
+    alignItems: 'center',
+  },
+  btnTextBlack: {
+    color: '#000',
+    fontWeight: 'bold',
+  },
+  btnTextRed: {
+    color: '#ff0000',
+    fontWeight: 'bold',
+  },
 });

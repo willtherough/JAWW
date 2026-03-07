@@ -1,121 +1,307 @@
-import React, { useState, useEffect } from 'react';
-import { View, Text, TextInput, Modal, TouchableOpacity, StyleSheet, FlatList, Keyboard } from 'react-native';
-import { expandQuery, calculateRelevance } from '../model/Brain'; // <--- The New Brain
-import CardRenderer from './CardRenderer';
+import React, { useState, useMemo } from 'react';
+import { 
+  Modal, 
+  View, 
+  Text, 
+  TouchableOpacity, 
+  FlatList, 
+  StyleSheet, 
+  SafeAreaView, 
+  StatusBar,
+  KeyboardAvoidingView,
+  Platform
+} from 'react-native';
+import SearchBar from './SearchBar'; // Ensure SearchBar.js is in /components
 
-export default function OracleModal({ visible, onClose, library }) {
+// UPDATED: Added 'onNavigate' to props
+export default function OracleModal({ visible, onClose, masterLibrary = [], funLibrary = [], onSelect, onNavigate }) {
   const [query, setQuery] = useState('');
-  const [results, setResults] = useState([]);
-  const [concepts, setConcepts] = useState([]);
 
-  // REAL-TIME SEARCH
-  useEffect(() => {
-    if (!query.trim()) {
-      setResults([]);
-      setConcepts([]);
-      return;
-    }
+  const MASTER_TAGS = [
+    'MEDICAL', 'SURVIVAL', 'TECH', 'PHYSIOLOGY', 
+    'OUTDOORS', 'TRADES', 'DOMESTIC', 'FINANCE', 
+    'BUSINESS', 'SCIENCE', 'CIVICS', 'LOGIC'
+  ];
 
-    // 1. EXPAND (Think)
-    const expandedTerms = expandQuery(query);
-    setConcepts(expandedTerms.filter(t => t !== query.toLowerCase())); // Show what we added
+  const FUN_TAGS = [
+    'SPORTS', 'NFL', 'SUPER BOWL', 'NCAA', 
+    'NBA', 'MLB', 'NHL', 'UFC', 'RACING', 'NASCAR', 'LE MANS'
+  ];
 
-    // 2. SEARCH & RANK (Process)
-    const ranked = library
-      .map(card => {
-        const score = calculateRelevance(card, expandedTerms);
-        return { ...card, score };
-      })
-      .filter(card => card.score > 0) // Remove irrelevant
-      .sort((a, b) => b.score - a.score); // Best match first
+  const library = [...masterLibrary, ...funLibrary];
 
-    setResults(ranked);
-  }, [query, library]);
+  // --- INTERNAL FILTER LOGIC (UPGRADED) ---
+  const results = useMemo(() => {
+    const q = query.toLowerCase().trim();
+    if (!q) return []; // Nothing to show if query is empty
+
+    const source = MASTER_TAGS.map(t => t.toLowerCase()).includes(q) 
+        ? masterLibrary 
+        : FUN_TAGS.map(t => t.toLowerCase()).includes(q)
+            ? funLibrary
+            : library;
+
+    return source.filter(card => 
+        card.title.toLowerCase().includes(q) || 
+        (card.category && card.category.toLowerCase().includes(q)) ||
+        (card.tags && card.tags.some(t => t.toLowerCase().includes(q))) ||
+        (card.keywords && card.keywords.some(k => k.toLowerCase().includes(q)))
+    );
+  }, [library, query, masterLibrary, funLibrary]);
+  // --- RENDER ITEM ---
+  const renderItem = ({ item }) => (
+    <TouchableOpacity 
+      style={styles.resultItem}
+      onPress={() => onSelect(item)} // Trigger selection
+    >
+      <View style={styles.resultHeader}>
+        <Text style={styles.resultTitle}>{item.title}</Text>
+        <Text style={styles.resultCategory}>{item.category || 'INTEL'}</Text>
+      </View>
+      <Text numberOfLines={2} style={styles.resultPreview}>
+        {item.body}
+      </Text>
+    </TouchableOpacity>
+  );
 
   return (
-    <Modal visible={visible} animationType="fade" transparent>
-      <View style={styles.overlay}>
-        <View style={styles.container}>
-          
-          {/* HEADER */}
-          <View style={styles.header}>
-            <Text style={styles.title}>ORACLE ENGINE</Text>
-            <TouchableOpacity onPress={onClose}>
-              <Text style={styles.closeText}>SHUTDOWN</Text>
-            </TouchableOpacity>
-          </View>
-
-          {/* INPUT */}
-          <TextInput 
-            style={styles.input}
-            placeholder="Query the Archive..."
-            placeholderTextColor="#666"
-            value={query}
-            onChangeText={setQuery}
-            autoFocus
-          />
-
-          {/* CONCEPTS (Showing the "Brain") */}
-          {concepts.length > 0 && (
-            <View style={styles.conceptRow}>
-              <Text style={styles.conceptLabel}>ASSOCIATED:</Text>
-              {concepts.slice(0, 4).map((c, i) => (
-                <View key={i} style={styles.conceptTag}>
-                  <Text style={styles.conceptText}>{c}</Text>
-                </View>
-              ))}
-            </View>
-          )}
-
-          {/* RESULTS */}
-          <FlatList 
-            data={results}
-            keyExtractor={item => item.id}
-            renderItem={({ item }) => (
-              <View style={styles.resultItem}>
-                <View style={styles.resultHeader}>
-                  <Text style={styles.resultTitle}>{item.title}</Text>
-                  <Text style={styles.matchScore}>{item.score}% REL</Text>
-                </View>
-                {/* Preview first 100 chars */}
-                <Text style={styles.preview}>
-                  {typeof item.body_json === 'string' 
-                    ? item.body_json.substring(0, 80).replace(/\n/g, ' ') + '...' 
-                    : 'Structured Data'}
-                </Text>
-              </View>
-            )}
-            ListEmptyComponent={
-              query ? <Text style={styles.empty}>No correlations found in local vector space.</Text> : null
-            }
-          />
-
+    <Modal visible={visible} animationType="slide" presentationStyle="fullScreen">
+      <SafeAreaView style={styles.container}>
+        <StatusBar barStyle="light-content" />
+        
+        {/* HEADER */}
+        <View style={styles.header}>
+          <Text style={styles.headerTitle}>ORACLE ENGINE</Text>
+          <Text style={styles.headerStatus}>// ONLINE</Text>
         </View>
-      </View>
+
+        {/* SEARCH INPUT */}
+        <View style={styles.searchContainer}>
+            <SearchBar 
+                value={query}
+                onChangeText={setQuery}
+                onClear={() => setQuery('')}
+            />
+        </View>
+
+        {/* CONTENT AREA */}
+        <View style={styles.content}>
+            {query.trim() === '' ? (
+                // --- EMPTY STATE: BASIC EDUCATION SUBJECTS ---
+                <View style={styles.emptyState}>
+                    <Text style={styles.sectionTitle}>// CORE KNOWLEDGE</Text>
+                    <View style={styles.tagCloud}>
+                        {MASTER_TAGS.map(tag => (
+                            <TouchableOpacity 
+                                key={tag} 
+                                style={styles.tagPill}
+                                onPress={() => setQuery(tag)}
+                            >
+                                <Text style={styles.tagText}>{tag}</Text>
+                            </TouchableOpacity>
+                        ))}
+                    </View>
+
+                    <View style={{ height: 24 }} />
+
+                    <Text style={styles.sectionTitle}>// RECREATIONAL & SPECIAL INTEREST</Text>
+                    <View style={styles.tagCloud}>
+                        {FUN_TAGS.map(tag => (
+                            <TouchableOpacity 
+                                key={tag} 
+                                style={[styles.tagPill, { borderColor: '#33ff00' }]}
+                                onPress={() => setQuery(tag)} 
+                            >
+                                <Text style={[styles.tagText, { color: '#33ff00' }]}>{tag}</Text>
+                            </TouchableOpacity>
+                        ))}
+                    </View>
+                    <Text style={styles.statsText}>
+                        CORE NODES: {masterLibrary.length} | FUN NODES: {funLibrary.length}
+                    </Text>
+                </View>
+            ) : (
+                // --- SEARCH RESULTS ---
+                <FlatList 
+                    data={results}
+                    keyExtractor={item => item.id}
+                    renderItem={renderItem}
+                    contentContainerStyle={{ paddingBottom: 20 }}
+                    keyboardShouldPersistTaps="handled"
+                />
+            )}
+        </View>
+
+        {/* --- FOOTER NAVIGATION (NEW) --- */}
+        <View style={styles.footer}>
+            {/* 1. DASHBOARD (Exit) */}
+            <TouchableOpacity onPress={onClose} style={styles.footBtn}>
+                <Text style={styles.footText}>DASHBOARD</Text>
+            </TouchableOpacity>
+
+            {/* 2. SCAN QR */}
+            <TouchableOpacity onPress={() => onNavigate('scan')} style={styles.footBtn}>
+                <Text style={styles.footText}>SCAN QR</Text>
+            </TouchableOpacity>
+
+            {/* 3. CREATE */}
+            <TouchableOpacity onPress={() => onNavigate('create')} style={styles.footBtnMain}>
+                <Text style={styles.footTextMain}>+ CREATE</Text>
+            </TouchableOpacity>
+
+            {/* 4. RADAR */}
+            <TouchableOpacity onPress={() => onNavigate('radar')} style={styles.footBtn}>
+                <Text style={styles.footText}>RADAR</Text>
+            </TouchableOpacity>
+        </View>
+
+      </SafeAreaView>
     </Modal>
   );
 }
 
 const styles = StyleSheet.create({
-  overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.9)', paddingTop: 50 },
-  container: { flex: 1, backgroundColor: '#121212', borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: 20 },
-  
-  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 },
-  title: { color: '#00ffff', fontSize: 18, fontWeight: 'bold', letterSpacing: 1 },
-  closeText: { color: '#666', fontWeight: 'bold' },
-  
-  input: { backgroundColor: '#222', color: '#fff', fontSize: 18, padding: 15, borderRadius: 8, marginBottom: 15, fontFamily: 'Courier', borderBottomWidth: 2, borderBottomColor: '#00ffff' },
-  
-  conceptRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 20, alignItems: 'center' },
-  conceptLabel: { color: '#666', fontSize: 10, fontWeight: 'bold' },
-  conceptTag: { backgroundColor: '#222', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 10, borderWidth: 1, borderColor: '#444' },
-  conceptText: { color: '#aaa', fontSize: 10, fontFamily: 'Courier' },
-
-  resultItem: { backgroundColor: '#1a1a1a', padding: 15, borderRadius: 8, marginBottom: 10, borderLeftWidth: 3, borderLeftColor: '#00ffff' },
-  resultHeader: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 5 },
-  resultTitle: { color: '#fff', fontWeight: 'bold', fontSize: 16 },
-  matchScore: { color: '#00ffff', fontSize: 10, fontWeight: 'bold' },
-  preview: { color: '#888', fontSize: 12, fontFamily: 'Courier' },
-  
-  empty: { color: '#444', textAlign: 'center', marginTop: 50, fontStyle: 'italic' }
+  container: {
+    flex: 1,
+    backgroundColor: '#050505', // Deep Black
+    paddingTop: Platform.OS === 'android' ? StatusBar.currentHeight : 0,
+    paddingBottom: Platform.OS === 'android' ? 20 : 0
+  },
+  header: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: 20,
+    borderBottomWidth: 1,
+    borderBottomColor: '#111',
+  },
+  headerTitle: {
+    color: '#00ffff', // Cyan for Oracle
+    fontSize: 18,
+    fontWeight: 'bold',
+    fontFamily: 'Courier',
+    letterSpacing: 1,
+  },
+  headerStatus: { 
+    color: '#00ff00', 
+    fontFamily: 'Courier', 
+    fontSize: 10 
+  },
+  closeText: {
+    color: '#666',
+    fontFamily: 'Courier',
+    fontSize: 14,
+  },
+  searchContainer: {
+    paddingVertical: 10,
+  },
+  content: {
+    flex: 1,
+    paddingHorizontal: 20,
+  },
+  // --- RESULT ITEMS ---
+  resultItem: {
+    backgroundColor: '#111',
+    marginBottom: 10,
+    padding: 15,
+    borderRadius: 6,
+    borderLeftWidth: 2,
+    borderLeftColor: '#00ffff',
+  },
+  resultHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 6,
+  },
+  resultTitle: {
+    color: '#fff',
+    fontWeight: 'bold',
+    fontSize: 16,
+    flex: 1,
+  },
+  resultCategory: {
+    color: '#00ffff',
+    fontSize: 10,
+    fontFamily: 'Courier',
+    marginTop: 2,
+    marginLeft: 10,
+  },
+  resultPreview: {
+    color: '#888',
+    fontSize: 12,
+  },
+  // --- EMPTY STATE ---
+  emptyState: {
+    marginTop: 40,
+    alignItems: 'center',
+  },
+  sectionTitle: {
+    color: '#444',
+    fontFamily: 'Courier',
+    marginBottom: 20,
+    fontSize: 12,
+  },
+  tagCloud: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    gap: 10,
+  },
+  tagPill: {
+    backgroundColor: '#002222',
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: '#004444',
+  },
+  tagText: {
+    color: '#00ffff',
+    fontSize: 12,
+    fontFamily: 'Courier',
+    fontWeight: 'bold',
+  },
+  statsText: {
+    color: '#333',
+    marginTop: 50,
+    fontFamily: 'Courier',
+    fontSize: 10,
+  },
+  // --- FOOTER STYLES ---
+  footer: {
+    flexDirection: 'row',
+    height: 80,
+    backgroundColor: '#000',
+    borderTopWidth: 1,
+    borderTopColor: '#333',
+    alignItems: 'center',
+    justifyContent: 'space-around',
+    paddingBottom: 10,
+  },
+  footBtn: { 
+    alignItems: 'center', 
+    justifyContent: 'center', 
+    flex: 1, 
+    height: '100%' 
+  },
+  footText: { 
+    color: '#666', 
+    fontSize: 10, 
+    fontFamily: 'Courier', 
+    fontWeight: 'bold' 
+  },
+  footBtnMain: {
+    backgroundColor: '#003300',
+    paddingVertical: 10,
+    paddingHorizontal: 20,
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: '#00ff00',
+  },
+  footTextMain: { 
+    color: '#00ff00', 
+    fontWeight: 'bold', 
+    fontSize: 12, 
+    fontFamily: 'Courier' 
+  },
 });

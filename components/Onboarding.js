@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { View, Text, Modal, TextInput, TouchableOpacity, StyleSheet, ScrollView, Alert, KeyboardAvoidingView, Platform } from 'react-native';
+import { View, Text, Modal, TextInput, TouchableOpacity, StyleSheet, ScrollView, Alert, KeyboardAvoidingView, Platform, StatusBar } from 'react-native';
 import { TOPICS, CREDENTIALS } from '../model/Definitions'; 
 
 export default function Onboarding({ visible, onComplete, initialData }) {
@@ -125,11 +125,11 @@ export default function Onboarding({ visible, onComplete, initialData }) {
         {/* STEP 0: MISSION STATEMENT (RESTORED) */}
         {step === 0 && (
           <View style={styles.stepBox}>
-            <Text style={styles.logo}>THE SOURCE</Text>
+            <Text style={styles.logo}>JAWW</Text>
             <Text style={styles.missionTitle}>CONTEXT FOR INFORMATION</Text>
             <View style={styles.missionBox}>
-                <Text style={styles.missionText}>"The Internet is full of useful information, but so is the world around you."</Text>
-                <Text style={styles.missionText}>The Source allows you to find information from experts in the real world, without access to the web.</Text>
+                <Text style={styles.missionText}>The Internet is full of useful information, but so is the world around you.</Text>
+                <Text style={styles.missionText}>The era of context begins...</Text>
             </View>
           </View>
         )}
@@ -161,7 +161,7 @@ export default function Onboarding({ visible, onComplete, initialData }) {
             <Text style={[styles.label, {marginTop: 20}]}>HOBBY / SKILL</Text>
             <TextInput style={styles.input} value={bgHobby} onChangeText={setBgHobby} placeholder="Passion" placeholderTextColor="#555" />
 
-            <Text style={[styles.label, {marginTop: 20}]}>PHYSICAL FIT</Text>
+            <Text style={[styles.label, {marginTop: 20}]}>PHYSICAL ACTIVITY</Text>
             <TextInput style={styles.input} value={bgFit} onChangeText={setBgFit} placeholder="Athletics" placeholderTextColor="#555" />
             
             {/* SMART FEEDBACK */}
@@ -216,7 +216,21 @@ export default function Onboarding({ visible, onComplete, initialData }) {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#111', padding: 30, justifyContent: 'center', alignItems: 'center' },
+  container: { 
+    flex: 1, 
+    backgroundColor: '#111', 
+    paddingHorizontal: 30,
+    paddingTop: 30,
+    paddingBottom: 30,
+    justifyContent: 'center', 
+    alignItems: 'center',
+    ...Platform.select({
+      android: {
+        paddingTop: (StatusBar.currentHeight || 0) + 10,
+        paddingBottom: 60,
+      }
+    })
+  },
   header: { color: '#00ff00', fontSize: 24, fontWeight: 'bold', marginBottom: 5, letterSpacing: 2 },
   subHeader: { color: '#666', fontSize: 12, marginBottom: 30, letterSpacing: 1 },
   

@@ -8,26 +8,23 @@ export default function CreateCardModal({ visible, onClose, onSave, initialData 
   // STATE
   const [title, setTitle] = useState('');
   const [body, setBody] = useState('');
-  const [topic, setTopic] = useState('other');
-  const [isSigning, setIsSigning] = useState(false); // <--- New State for loading
+  const [topic, setTopic] = useState('general');
+  const [subject, setSubject] = useState('');
+  const [isSigning, setIsSigning] = useState(false);
 
   // POPULATE DATA ON OPEN (For Editing)
   useEffect(() => {
     if (visible) {
       if (initialData) {
         setTitle(initialData.title || '');
-        try {
-            const parsed = typeof initialData.body_json === 'string' ? JSON.parse(initialData.body_json) : initialData.body_json;
-            setBody(parsed.content || initialData.body_json);
-        } catch (e) {
-            setBody(initialData.body_json || '');
-        }
-        setTopic(initialData.topic || 'other'); 
-
+        setBody(initialData.body || '');
+        setTopic(initialData.topic ? initialData.topic.replace('human/','') : 'general');
+        setSubject(initialData.subject || '');
       } else {
         setTitle('');
         setBody('');
-        setTopic('other');
+        setTopic('general');
+        setSubject('');
       }
     }
   }, [visible, initialData]);
@@ -37,7 +34,6 @@ export default function CreateCardModal({ visible, onClose, onSave, initialData 
     
     setIsSigning(true);
 
-    // 1. Get Identity (The Fix)
     const keys = await getOrGenerateKeys();
     if (!keys) {
       Alert.alert("Error", "Could not retrieve Identity Keys.");
@@ -48,22 +44,22 @@ export default function CreateCardModal({ visible, onClose, onSave, initialData 
     const rawData = {
       title,
       topic,
+      subject,
       body_json: JSON.stringify({ content: body }), 
       type: 'narrative_markdown',
       timestamp: new Date().toISOString()
     };
 
-    // 2. Sign
     const signature = await signData(rawData);
 
-    // 3. Package
     const finalCard = {
       ...rawData,
       history: [{ 
         timestamp: new Date().toISOString(),
         signature: signature,
-        signer: keys.publicKey // <--- NOW IT IS REAL
-      }]
+        signer: keys.publicKey
+      }],
+      body: body,
     };
 
     await onSave(finalCard);
@@ -72,16 +68,17 @@ export default function CreateCardModal({ visible, onClose, onSave, initialData 
 
   return (
     <Modal visible={visible} animationType="slide" transparent>
-      {/* FIX: Set behavior to 'padding' for iOS only. Android handles this natively. */}
-<KeyboardAvoidingView 
-  behavior={Platform.OS === "ios" ? "padding" : undefined} 
-  style={styles.overlay}
->
-        <View style={styles.container}>
-          
+      <KeyboardAvoidingView 
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'} 
+        style={styles.overlay}
+      >
+        <ScrollView 
+          style={styles.container}
+          contentContainerStyle={{ flexGrow: 1, paddingBottom: 100 }}
+          keyboardShouldPersistTaps="handled"
+        >
           <Text style={styles.header}>{initialData ? 'EDIT RECORD' : 'NEW DATA ENTRY'}</Text>
           
-          {/* TITLE INPUT */}
           <Text style={styles.label}>TITLE / HEADLINE</Text>
           <TextInput 
             style={styles.input} 
@@ -92,7 +89,6 @@ export default function CreateCardModal({ visible, onClose, onSave, initialData 
             editable={!isSigning}
           />
 
-          {/* TOPIC SELECTOR */}
           <Text style={styles.label}>CLASSIFICATION SECTOR</Text>
           <View style={styles.topicRow}>
             <ScrollView horizontal showsHorizontalScrollIndicator={false}>
@@ -103,14 +99,22 @@ export default function CreateCardModal({ visible, onClose, onSave, initialData 
                   style={[styles.topicChip, topic === t.id && styles.topicChipActive]}
                   disabled={isSigning}
                 >
-                  <Text style={{fontSize: 16, marginRight: 5}}>{t.icon}</Text>
                   <Text style={[styles.topicText, topic === t.id && {color: '#000'}]}>{t.label}</Text>
                 </TouchableOpacity>
               ))}
             </ScrollView>
           </View>
 
-          {/* BODY INPUT */}
+          <Text style={styles.label}>SUBJECT</Text>
+          <TextInput
+            style={styles.input}
+            placeholder="Specific Subject (e.g., History, Recipes, Networking)"
+            placeholderTextColor="#555"
+            value={subject}
+            onChangeText={setSubject}
+            editable={!isSigning}
+          />
+
           <Text style={styles.label}>DATA PAYLOAD</Text>
           <TextInput 
             style={[styles.input, styles.textArea]} 
@@ -123,22 +127,15 @@ export default function CreateCardModal({ visible, onClose, onSave, initialData 
             editable={!isSigning}
           />
 
-          {/* ACTION BUTTONS */}
           <View style={styles.btnRow}>
             <TouchableOpacity onPress={onClose} style={styles.btnCancel} disabled={isSigning}>
               <Text style={styles.btnTextGray}>CANCEL</Text>
             </TouchableOpacity>
-
             <TouchableOpacity onPress={handleSave} style={styles.btnSave} disabled={isSigning}>
-               {isSigning ? (
-                  <ActivityIndicator color="#000" />
-               ) : (
-                  <Text style={styles.btnTextBlack}>{initialData ? 'SIGN & UPDATE' : 'ENCRYPT & SAVE'}</Text>
-               )}
+               {isSigning ? <ActivityIndicator color="#000" /> : <Text style={styles.btnTextBlack}>{initialData ? 'SIGN & UPDATE' : 'ENCRYPT & SAVE'}</Text>}
             </TouchableOpacity>
           </View>
-
-        </View>
+        </ScrollView>
       </KeyboardAvoidingView>
     </Modal>
   );

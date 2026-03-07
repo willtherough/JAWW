@@ -1,8 +1,12 @@
 {
   "expo": {
-    "name": "The Source",
-    "slug": "TheSource",
+    "name": "JAWW",
+    "slug": "jaww",
     "version": "1.0.0",
+    "runtimeVersion": "1.0.0",
+    "updates": {
+      "enabled": false
+    },
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
@@ -68,7 +72,7 @@
         }
       ],
       [
-        "@config-plugins/react-native-ble-plx",
+        "react-native-ble-plx",
         {
           "isBackgroundEnabled": true,
           "modes": [
@@ -81,7 +85,7 @@
     ],
     "extra": {
       "eas": {
-        "projectId": "fff27ed6-c910-4270-b6dc-f18cf3b1d9db"
+        "projectId": "1782b43c-1505-427b-af12-1f16687221d5"
       }
     }
   }

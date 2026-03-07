@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Modal, View, Text, TextInput, TouchableOpacity, StyleSheet, ScrollView, Alert, SafeAreaView, Clipboard } from 'react-native';
 import QRCode from 'react-native-qrcode-svg'; // KEEPING YOUR QR LIBRARY
 
-export default function IdentityModal({ visible, onClose, profile, library, onReset }) {
+export default function IdentityModal({ visible, onClose, profile, library, onReset, onClearLibrary }) {
   // SAFEGUARD: Ensure bio exists, even if profile is new
   const safeBio = profile.bio || {};
   
@@ -142,7 +142,11 @@ export default function IdentityModal({ visible, onClose, profile, library, onRe
                   <Text style={styles.secondaryText}>COPY PUBLIC KEY</Text>
                 </TouchableOpacity>
 
-                <TouchableOpacity onPress={onReset} style={{marginTop: 30, padding: 15, alignItems:'center'}}>
+                <TouchableOpacity onPress={onClearLibrary} style={{marginTop: 10, padding: 10, alignItems:'center', backgroundColor: '#220000', borderRadius: 5, marginHorizontal: 20}}>
+                  <Text style={{color:'#ff6666', fontSize: 10, fontWeight:'bold'}}>DEBUG: CLEAR LIBRARY</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity onPress={onReset} style={{marginTop: 10, padding: 15, alignItems:'center'}}>
                   <Text style={{color:'#330000', fontSize: 10, fontWeight:'bold'}}>⚠ FACTORY RESET IDENTITY</Text>
                 </TouchableOpacity>
               </>

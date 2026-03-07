@@ -1,20 +1,13 @@
 // model/Definitions.js
 
-// 1. TOPICS (Expanded Taxonomy)
+// 1. TOPICS (Standardized Core Categories)
 export const TOPICS = [
-  { id: 'history', label: 'History', icon: '🏛️' },
-  { id: 'math', label: 'Mathematics', icon: '📐' },
-  { id: 'science', label: 'Science', icon: '🔬' },
-  { id: 'health', label: 'Health & Fitness', icon: '💪' },
-  { id: 'tech', label: 'Technology', icon: '💻' },
-  { id: 'art', label: 'Arts & Culture', icon: '🎨' },
-  { id: 'politics', label: 'Politics', icon: '⚖️' },
-  { id: 'business', label: 'Business / Econ', icon: '💰' },
-  { id: 'outdoors', label: 'Outdoors / Survival', icon: '🌲' },
-  { id: 'cooking', label: 'Culinary', icon: '🍳' },
-  { id: 'music', label: 'Music', icon: '🎵' },
-  { id: 'diy', label: 'Home / DIY', icon: '🔨' },
-  { id: 'other', label: 'General / Other', icon: '📦' },
+  { id: 'food', label: 'Food' },
+  { id: 'edu', label: 'Education' },
+  { id: 'fit', label: 'Fitness' },
+  { id: 'pro', label: 'Professional' },
+  { id: 'fun', label: 'Fun' },
+  { id: 'general', label: 'General' },
 ];
 
 // 2. CREDENTIAL TIERS (New - For "Good Will Hunting" Inference)

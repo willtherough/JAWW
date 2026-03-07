@@ -11,7 +11,8 @@ import {
 
 import BluetoothService from '../services/BluetoothService';
 import KnowledgeCard from '../components/KnowledgeCard';
-import IdentityService from '../services/IdentityService';
+import { getOrGenerateKeys, signData } from '../model/Security';
+import { createCard } from '../model/Schema';
 
 // --- MOCK IDENTITY (Phase 7 Placeholder) ---
 // In the future, these come from the secure wallet.
@@ -24,16 +25,17 @@ export const HomeScreen = () => {
   const [message, setMessage] = useState('');
   const [isBroadcasting, setIsBroadcasting] = useState(false);
   const [previewCard, setPreviewCard] = useState(null);
+  const [keys, setKeys] = useState(null);
 
   // 1. THE ACTION: Prepare the Truth
-  const handlePreparePacket = () => {
+  const handlePreparePacket = async () => {
     if (!message.trim()) {
       Alert.alert("Empty Chamber", "You cannot fire an empty message.");
       return;
     }
 
     // PASS THE IDENTITY SERVICE SO WE CAN SIGN IT
-    const packet = BluetoothService.createPacket(message, IdentityService);
+    const packet = await createPacket(message);
     
     if (packet) {
         setPreviewCard(packet);
@@ -49,18 +51,18 @@ export const HomeScreen = () => {
     } else {
       // Open Fire
       if (!previewCard) {
-        handlePreparePacket(); // Auto-prepare if they haven't yet
+        await handlePreparePacket(); // Auto-prepare if they haven't yet
         if (!message.trim()) return;
       }
 
       // 1. GENERATE LIVE PACKET
       // We pass the IdentityService so it can sign the packet with your real Private Key
-      const livePacket = BluetoothService.createPacket(message, IdentityService);
+      const livePacket = await createPacket(message);
       
       // 2. DERIVE HANDLE
       // We use the first 8 characters of your Public Key as your "Callsign"
-      const myHandle = IdentityService.publicKey 
-        ? IdentityService.publicKey.slice(0, 8) 
+      const myHandle = keys.publicKey 
+        ? keys.publicKey.slice(0, 8) 
         : "Unknown";
 
       // 3. BROADCAST
@@ -70,12 +72,28 @@ export const HomeScreen = () => {
     }
   };
 
+  const createPacket = async (message) => {
+    if (!keys) {
+        Alert.alert("Identity Error", "User identity not loaded.");
+        return null;
+    }
+    // 1. Create the basic card structure
+    const card = await createCard(keys.publicKey, "Broadcast", message, "/ble/broadcast");
+
+    // 2. Sign the hash of the card
+    const signature = await signData(card.hash);
+    card.genesis.signature = signature;
+
+    return card;
+  };
+
   // Cleanup on unmount (Don't leave the radio running)
   useEffect(() => {
     // MINT THE KEYS ON LOAD
     const init = async () => {
-        const myId = await IdentityService.loadIdentity();
-        console.log(">> SYSTEM: Identity Loaded. Public Key:", myId);
+        const userKeys = await getOrGenerateKeys();
+        setKeys(userKeys);
+        console.log(">> SYSTEM: Identity Loaded. Public Key:", userKeys.publicKey);
     };
     init();
     
