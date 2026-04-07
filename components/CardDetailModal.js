@@ -1,11 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import BluetoothService from '../services/BluetoothService';
 import { 
-  Modal, View, Text, ScrollView, TouchableOpacity, StyleSheet, Dimensions, Alert, Vibration
+  Modal, View, Text, ScrollView, TouchableOpacity, StyleSheet, Platform, Dimensions, Alert, Vibration
 } from 'react-native';
 import QRCode from 'react-native-qrcode-svg';
-import { Feather } from '@expo/vector-icons'; // Import Feather icons
-import { insertTrustedSource, removeTrustedSource, isSourceTrusted } from '../model/database'; // Import DB functions
+import { Feather } from '@expo/vector-icons';
+import { insertTrustedSource, removeTrustedSource, isSourceTrusted } from '../model/database'; 
 
 const SCREEN_HEIGHT = Dimensions.get('window').height;
 
@@ -15,19 +15,27 @@ const ReviewModal = ({ visible, onClose, onBlock, onRequestReview, onFlag }) => 
     return (
         <Modal visible={visible} transparent animationType="fade">
             <View style={styles.modalOverlay}>
-                <View style={[styles.modalBox, {borderColor: '#f59e0b'}]}>
-                    <Text style={styles.modalTitle}>REVIEW OPTIONS</Text>
-                    <TouchableOpacity onPress={onRequestReview} style={[styles.btnOutline, {marginTop: 0, borderColor: '#f59e0b'}]}>
-                        <Text style={[styles.btnTextGray, {color: '#f59e0b'}]}>REQUEST REVIEW</Text>
+                <View style={[styles.modalBox, {borderColor: '#F59E0B', borderWidth: 2}]}>
+                    <View style={styles.reviewHeader}>
+                        <Feather name="alert-triangle" size={18} color="#F59E0B" />
+                        <Text style={styles.reviewTitle}>OPERATOR REVIEW</Text>
+                    </View>
+                    
+                    <TouchableOpacity onPress={onRequestReview} style={styles.btnOutlineAmber}>
+                        <Text style={styles.btnTextAmber}>REQUEST NETWORK REVIEW</Text>
                     </TouchableOpacity>
-                    <TouchableOpacity onPress={onFlag} style={[styles.btnOutline, {borderColor: '#f59e0b'}]}>
-                        <Text style={[styles.btnTextGray, {color: '#f59e0b'}]}>FLAG</Text>
+                    
+                    <TouchableOpacity onPress={onFlag} style={styles.btnOutlineAmber}>
+                        <Text style={styles.btnTextAmber}>FLAG CONTENT</Text>
                     </TouchableOpacity>
-                    <TouchableOpacity onPress={onBlock} style={[styles.btnOutline, {borderColor: '#ff0000', backgroundColor: '#440000'}]}>
-                        <Text style={[styles.btnTextGray, {color: '#ff0000'}]}>BURN CARD & BLOCK</Text>
+                    
+                    <TouchableOpacity onPress={onBlock} style={styles.btnOutlineDanger}>
+                        <Feather name="x-octagon" size={14} color="#EF4444" style={{marginRight: 6}} />
+                        <Text style={styles.btnTextDanger}>BURN CARD & BLOCK OP</Text>
                     </TouchableOpacity>
+                    
                     <TouchableOpacity onPress={onClose} style={styles.btnCancel}>
-                        <Text style={styles.btnTextGray}>CANCEL</Text>
+                        <Text style={styles.btnTextGray}>ABORT</Text>
                     </TouchableOpacity>
                 </View>
             </View>
@@ -35,20 +43,11 @@ const ReviewModal = ({ visible, onClose, onBlock, onRequestReview, onFlag }) => 
     );
 };
 
-export default function CardDetailModal({ visible, card, onClose, onFork, onChain, onEnhance, onBlockOperator, currentUserHandle, onRequestReview }) {
+export default function CardDetailModal({ visible, card, onClose, onFork, onChain, onEnhance, onBlockOperator, currentUserHandle, onRequestReview, onOffer, onMeshSync }) {
   const [isQRVisible, setIsQRVisible] = useState(false);
-  const [isTrusted, setIsTrusted] = useState(false); // State for vouch status
+  const [isTrusted, setIsTrusted] = useState(false);
   const [isReviewModalVisible, setReviewModalVisible] = useState(false);
-
-  // --- TRIGGER BROADCAST WHEN OFFERING ---
-  useEffect(() => {
-    if (isQRVisible) {
-        console.log(">> OFFER MODE: Starting Broadcast...");
-        BluetoothService.startAdvertising();
-    }
-  }, [isQRVisible]);
   
-  // --- CHECK TRUST STATUS ON CARD LOAD ---
   useEffect(() => {
     const checkTrust = async () => {
       if (card?.genesis?.author_id) {
@@ -63,7 +62,6 @@ export default function CardDetailModal({ visible, card, onClose, onFork, onChai
 
   if (!visible || !card) return null;
 
-  // --- HANDLER FOR VOUCH/UNVOUCH ---
   const handleVouchOperator = async () => {
     const authorId = card.genesis?.author_id;
     const authorHandle = card.author || 'Unknown';
@@ -95,17 +93,14 @@ export default function CardDetailModal({ visible, card, onClose, onFork, onChai
     }
   };
 
-  // 1. DETECT SYSTEM CARD
   const SYSTEM_CATEGORIES = [
     'TECH', 'MEDICAL', 'PHYSIOLOGY', 'OUTDOORS', 'SURVIVAL', 
     'TRADES', 'DOMESTIC', 'FINANCE', 'BUSINESS', 'SCIENCE', 'CIVICS', 'LOGIC'
   ];
   const isSystemCard = SYSTEM_CATEGORIES.includes(card.category) && card.author !== currentUserHandle;
 
-  // 2. PREPARE DATA
-  const forkNote = card.history?.slice().reverse().find(h => h.action === 'FORKED')?.note;
+  const forkNote = card.history?.slice().reverse().find(h => h.action === 'FORKED' || h.action === 'FORK')?.note;
   const author = card.originalAuthor || (card.genesis ? card.genesis.author_id : card.author) || "Unknown";
-  
   const qrPayload = `JAWW:${currentUserHandle}:${card.id}`;
 
   const handleBlock = () => {
@@ -121,26 +116,39 @@ export default function CardDetailModal({ visible, card, onClose, onFork, onChai
   }
 
   const handleFlag = () => {
-    // TODO: Implement Flag
     console.log("Flag pressed");
     setReviewModalVisible(false);
     onClose();
   }
+
+  const formatKey = (key) => {
+    if (!key || key === 'Unknown') return 'UNKNOWN';
+    if (key === 'Local Generation') return 'LOCAL GENERATION';
+    if (key.length > 20) return `${key.substring(0, 8)}...${key.substring(key.length - 8)}`;
+    return key;
+  };
 
   return (
     <Modal visible={visible} transparent animationType="slide">
       <View style={styles.modalOverlay}>
         <View style={styles.modalBox}>
             
-            {/* --- HEADER --- */}
-            <View style={{alignItems:'center', marginBottom:10}}>
-                {!isSystemCard && (
+            {/* --- TOP BAR: CHAIN OF CUSTODY --- */}
+            <View style={styles.topBar}>
+                {!isSystemCard ? (
                     <TouchableOpacity onPress={onChain} style={styles.topChainBtn}>
-                        <Text style={styles.topChainText}>⛓ CHAIN OF CUSTODY</Text>
+                        <Feather name="link" size={12} color="#94A3B8" />
+                        <Text style={styles.topChainText}>CHAIN OF CUSTODY</Text>
                     </TouchableOpacity>
-                )}
+                ) : <View />}
+                <TouchableOpacity onPress={onClose}>
+                    <Feather name="x" size={24} color="#64748B" />
+                </TouchableOpacity>
+            </View>
 
-                <View style={{flexDirection:'row', alignItems:'center', marginTop: 10}}>
+            {/* --- HEADER --- */}
+            <View style={styles.headerContainer}>
+                <View style={{flexDirection:'row', alignItems:'center', justifyContent: 'center', flexWrap: 'wrap'}}>
                     <Text style={styles.modalTitle}>{card.title}</Text>
                     {card.forkedFrom && (
                         <View style={styles.forkBadge}>
@@ -149,7 +157,7 @@ export default function CardDetailModal({ visible, card, onClose, onFork, onChai
                     )}
                 </View>
                 
-                <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                <View style={styles.metaRow}>
                     <Text style={styles.metaText}>
                         {isSystemCard 
                             ? `// CORE LIBRARY: ${card.category} //` 
@@ -157,84 +165,86 @@ export default function CardDetailModal({ visible, card, onClose, onFork, onChai
                         }
                     </Text>
                     {!isSystemCard && author !== currentUserHandle && (
-                        <TouchableOpacity onPress={handleVouchOperator} style={{ marginLeft: 8 }}>
-                            <Feather name="star" size={16} color={isTrusted ? '#f59e0b' : '#555'} />
+                        <TouchableOpacity onPress={handleVouchOperator} style={styles.vouchBtn}>
+                            <Feather name="star" size={14} color={isTrusted ? '#F59E0B' : '#64748B'} />
                         </TouchableOpacity>
                     )}
                 </View>
             </View>
 
             {/* --- BODY SCROLL --- */}
-            <ScrollView style={{ maxHeight: SCREEN_HEIGHT * 0.45 }}>
+            <ScrollView style={styles.bodyScroll}>
                 <Text style={styles.cardBody}>{card.body}</Text>
                 
                 {forkNote && !isSystemCard && (
                     <View style={styles.noteBox}>
-                        <Text style={styles.noteLabel}>CURATOR'S NOTE</Text>
+                        <View style={styles.noteHeader}>
+                            <Feather name="edit-3" size={12} color="#F59E0B" />
+                            <Text style={styles.noteLabel}>CURATOR'S NOTE</Text>
+                        </View>
                         <Text style={styles.noteText}>"{forkNote}"</Text>
                     </View>
                 )}
             </ScrollView>
             
-            {/* --- QR CODE --- */}
+            {/* --- QR CODE (CONDITIONAL) --- */}
             {isQRVisible && !isSystemCard && (
-              <View style={{ alignItems: 'center', marginVertical: 20 }}>
-                <View style={{backgroundColor:'white', padding: 10, borderRadius: 5}}>
-                    <QRCode value={qrPayload} size={150}/>
+              <View style={styles.qrContainer}>
+                <View style={styles.qrWrapper}>
+                    <QRCode value={qrPayload} size={150} backgroundColor="#FFFFFF" color="#000000" />
                 </View>
-                <Text style={{color:'#00ff00', fontSize:12, marginTop: 10, fontFamily:'Courier', fontWeight:'bold'}}>
-                    SCAN TO ACQUIRE
-                </Text>
+                <Text style={styles.qrLabel}>SCAN TO ACQUIRE</Text>
               </View>
             )}
             
             {/* --- FOOTER ACTIONS --- */}
             <View style={styles.footerContainer}>
-                
                 {isSystemCard ? (
-                    <TouchableOpacity 
-                        style={styles.btnEnhance} 
-                        onPress={() => onEnhance(card)}
-                    >
+                    <TouchableOpacity style={styles.btnEnhance} onPress={() => onEnhance(card)}>
+                        <Feather name="plus-circle" size={16} color="#10B981" />
                         <Text style={styles.btnEnhanceText}>CREATE A BETTER GUIDE</Text>
                     </TouchableOpacity>
                 ) : (
                     <>
-                        <View style={{flexDirection:'row', gap: 10, width: '100%'}}>
-                            <TouchableOpacity onPress={() => onFork(card)} style={[styles.btnAction, {borderColor: '#f59e0b'}]}>
-                                <Text style={{color: '#f59e0b', fontWeight:'bold', fontSize: 16}}>⑂</Text>
-                                <Text style={{color: '#f59e0b', fontWeight:'bold', fontFamily: 'Courier', marginLeft: 5}}>FORK</Text>
+                        <View style={styles.actionRow}>
+                            <TouchableOpacity onPress={() => onFork(card)} style={styles.btnActionAmber}>
+                                <Text style={styles.btnActionIconAmber}>⑂</Text>
+                                <Text style={styles.btnActionTextAmber}>FORK</Text>
+                            </TouchableOpacity>
+
+                            <TouchableOpacity onPress={() => onMeshSync && onMeshSync(card.id)} style={styles.btnActionAmber}>
+                                <Feather name="refresh-cw" size={14} color="#F59E0B" />
+                                <Text style={styles.btnActionTextAmber}>SYNC</Text>
                             </TouchableOpacity>
 
                             <TouchableOpacity 
-                                onPress={() => setIsQRVisible(!isQRVisible)} 
-                                style={[
-                                    styles.btnAction, 
-                                    {
-                                        borderColor: isQRVisible ? '#fff' : '#00ff00', 
-                                        backgroundColor: isQRVisible ? '#222' : 'transparent'
+                                onPress={() => {
+                                    const nextState = !isQRVisible;
+                                    setIsQRVisible(nextState);
+                                    if (nextState && onOffer) {
+                                        onOffer(card); 
+                                    } else if (!nextState) {
+                                        BluetoothService.stopBroadcasting();
                                     }
-                                ]}
+                                }} 
+                                style={isQRVisible ? styles.btnActionActive : styles.btnActionGreen}
                             >
-                                <Text style={{color: isQRVisible ? '#fff' : '#00ff00', fontWeight:'bold', fontFamily: 'Courier'}}>
-                                    {isQRVisible ? 'CLOSE' : 'OFFER'}
+                                <Feather name={isQRVisible ? "eye-off" : "radio"} size={14} color={isQRVisible ? '#F8FAFC' : '#10B981'} />
+                                <Text style={isQRVisible ? styles.btnActionTextActive : styles.btnActionTextGreen}>
+                                    {isQRVisible ? 'CLOSE TX' : 'OFFER TX'}
                                 </Text>
                             </TouchableOpacity>
                         </View>
-                        {/* THE GUARDRAIL: Do not allow the Operator to burn themselves */}
+
                         {author !== currentUserHandle && (
-                            <TouchableOpacity onPress={() => setReviewModalVisible(true)} style={[styles.btnAction, {borderColor: '#f59e0b', marginTop: 10, backgroundColor: '#4c3b00'}]}>
-                                <Text style={{color: '#f59e0b', fontWeight:'bold', fontFamily: 'Courier'}}>REVIEW</Text>
+                            <TouchableOpacity onPress={() => setReviewModalVisible(true)} style={styles.btnReview}>
+                                <Feather name="shield" size={14} color="#64748B" />
+                                <Text style={styles.btnReviewText}>OPERATOR REVIEW</Text>
                             </TouchableOpacity>
                         )}
                     </>
                 )}
             </View>
-
-            <TouchableOpacity onPress={onClose} style={styles.btnCancel}>
-                <Text style={styles.btnTextGray}>CLOSE</Text>
-            </TouchableOpacity>
-
         </View>
       </View>
       <ReviewModal 
@@ -249,38 +259,49 @@ export default function CardDetailModal({ visible, card, onClose, onFork, onChai
 }
 
 const styles = StyleSheet.create({
-  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.9)', justifyContent: 'center', padding: 20 },
-  modalBox: { backgroundColor: '#1a1a1a', borderRadius: 10, padding: 20, borderWidth: 1, borderColor: '#333' },
-  topChainBtn: { paddingVertical: 4, paddingHorizontal: 8, borderRadius: 4, backgroundColor: '#222', borderWidth: 1, borderColor: '#444' },
-  topChainText: { color: '#888', fontSize: 10, fontFamily: 'Courier', fontWeight: 'bold' },
-  modalTitle: { color: '#fff', fontSize: 20, fontWeight: 'bold', marginBottom: 5, fontFamily: 'Courier', textAlign: 'center' },
-  metaText: { color: '#00ff00', fontSize: 10, fontFamily: 'Courier', marginTop: 5 },
-  forkBadge: { backgroundColor: '#f59e0b', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4, marginLeft: 8 },
-  forkText: { color: '#000', fontSize: 10, fontWeight: 'bold' },
-  cardBody: { color: '#ccc', fontSize: 14, lineHeight: 22, fontFamily: 'Courier', marginVertical: 10 },
-  noteBox: { marginTop: 15, padding: 10, backgroundColor: '#222', borderLeftWidth: 3, borderLeftColor: '#f59e0b', borderRadius: 4 },
-  noteLabel: { color: '#f59e0b', fontSize: 10, fontWeight: 'bold', marginBottom: 5, fontFamily: 'Courier' },
-  noteText: { color: '#ccc', fontStyle: 'italic', fontSize: 12 },
-  footerContainer: { marginTop: 20, borderTopWidth: 1, borderColor: '#333', paddingTop: 20 },
-  btnAction: { flex: 1, flexDirection: 'row', borderWidth: 1, padding: 12, borderRadius: 6, alignItems: 'center', justifyContent: 'center' },
-  btnEnhance: {
-    backgroundColor: '#003300', 
-    paddingVertical: 14,
-    borderRadius: 4,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 1,
-    borderColor: '#00ff00',     
-    width: '100%',
-  },
-  btnEnhanceText: {
-    color: '#00ff00',
-    fontSize: 14, 
-    fontWeight: 'bold', 
-    fontFamily: 'Courier',
-    letterSpacing: 1,
-  },
-  btnCancel: { marginTop: 15, padding: 10, alignItems: 'center' },
-  btnTextGray: { color: '#444', fontFamily: 'Courier', fontSize: 12, fontWeight: 'bold' },
-  btnOutline: { borderWidth: 1, borderColor: '#666', padding: 15, borderRadius: 8, alignItems: 'center', marginTop: 10 },
+  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.85)', justifyContent: 'center', padding: 16 },
+  modalBox: { backgroundColor: '#0F172A', borderRadius: 8, padding: 20, borderWidth: 1, borderColor: '#334155' },
+  topBar: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 },
+  topChainBtn: { flexDirection: 'row', alignItems: 'center', paddingVertical: 6, paddingHorizontal: 10, borderRadius: 4, backgroundColor: '#1E293B', borderWidth: 1, borderColor: '#334155', gap: 6 },
+  topChainText: { color: '#94A3B8', fontSize: 10, fontFamily: 'Courier', fontWeight: 'bold' },
+  headerContainer: { alignItems: 'center', marginBottom: 16, borderBottomWidth: 1, borderBottomColor: '#334155', paddingBottom: 16 },
+  modalTitle: { color: '#F8FAFC', fontSize: 20, fontWeight: 'bold', fontFamily: 'Courier', textAlign: 'center', letterSpacing: 1 },
+  forkBadge: { backgroundColor: '#F59E0B', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4, marginLeft: 8 },
+  forkText: { color: '#000', fontSize: 10, fontWeight: 'bold', fontFamily: 'Courier' },
+  metaRow: { flexDirection: 'row', alignItems: 'center', marginTop: 10 },
+  metaText: { color: '#10B981', fontSize: 11, fontFamily: 'Courier', letterSpacing: 0.5 },
+  vouchBtn: { marginLeft: 10, padding: 4, backgroundColor: '#1E293B', borderRadius: 4, borderWidth: 1, borderColor: '#334155' },
+  bodyScroll: { maxHeight: SCREEN_HEIGHT * 0.40 },
+  cardBody: { color: '#E2E8F0', fontSize: 15, lineHeight: 24, fontFamily: 'Courier', marginVertical: 10 },
+  noteBox: { marginTop: 16, padding: 12, backgroundColor: '#1E293B', borderLeftWidth: 3, borderLeftColor: '#F59E0B', borderRadius: 4 },
+  noteHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 6, gap: 6 },
+  noteLabel: { color: '#F59E0B', fontSize: 11, fontWeight: 'bold', fontFamily: 'Courier' },
+  noteText: { color: '#CBD5E1', fontStyle: 'italic', fontSize: 13, lineHeight: 20 },
+  qrContainer: { alignItems: 'center', marginVertical: 20 },
+  qrWrapper: { backgroundColor: '#FFFFFF', padding: 12, borderRadius: 8 },
+  qrLabel: { color: '#10B981', fontSize: 12, marginTop: 12, fontFamily: 'Courier', fontWeight: 'bold', letterSpacing: 2 },
+  footerContainer: { marginTop: 16, paddingTop: 16 },
+  actionRow: { flexDirection: 'row', gap: 12, width: '100%' },
+  btnActionAmber: { flex: 1, flexDirection: 'row', borderWidth: 1, borderColor: '#F59E0B', backgroundColor: 'rgba(245, 158, 11, 0.1)', padding: 14, borderRadius: 6, alignItems: 'center', justifyContent: 'center', gap: 6 },
+  btnActionTextAmber: { color: '#F59E0B', fontWeight: 'bold', fontFamily: 'Courier', fontSize: 14 },
+  btnActionIconAmber: { color: '#F59E0B', fontWeight: 'bold', fontSize: 16 },
+  btnActionGreen: { flex: 1, flexDirection: 'row', borderWidth: 1, borderColor: '#10B981', backgroundColor: 'rgba(16, 185, 129, 0.1)', padding: 14, borderRadius: 6, alignItems: 'center', justifyContent: 'center', gap: 6 },
+  btnActionTextGreen: { color: '#10B981', fontWeight: 'bold', fontFamily: 'Courier', fontSize: 14 },
+  btnActionActive: { flex: 1, flexDirection: 'row', borderWidth: 1, borderColor: '#F8FAFC', backgroundColor: '#334155', padding: 14, borderRadius: 6, alignItems: 'center', justifyContent: 'center', gap: 6 },
+  btnActionTextActive: { color: '#F8FAFC', fontWeight: 'bold', fontFamily: 'Courier', fontSize: 14 },
+  btnReview: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', marginTop: 12, padding: 12, borderWidth: 1, borderColor: '#334155', borderRadius: 6, gap: 8 },
+  btnReviewText: { color: '#94A3B8', fontWeight: 'bold', fontFamily: 'Courier', fontSize: 12, letterSpacing: 1 },
+  btnEnhance: { flexDirection: 'row', backgroundColor: '#022C22', paddingVertical: 16, borderRadius: 6, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#10B981', width: '100%', gap: 8 },
+  btnEnhanceText: { color: '#10B981', fontSize: 14, fontWeight: 'bold', fontFamily: 'Courier', letterSpacing: 1 },
+  btnCancel: { marginTop: 16, padding: 12, alignItems: 'center' },
+  btnTextGray: { color: '#94A3B8', fontFamily: 'Courier', fontSize: 13, fontWeight: 'bold', letterSpacing: 1 },
+  
+  // Review Modal Styles
+  reviewHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', marginBottom: 20, gap: 8 },
+  reviewTitle: { color: '#F59E0B', fontSize: 16, fontWeight: 'bold', fontFamily: 'Courier', letterSpacing: 1 },
+  btnOutlineAmber: { borderWidth: 1, borderColor: '#F59E0B', backgroundColor: 'rgba(245, 158, 11, 0.05)', padding: 14, borderRadius: 6, alignItems: 'center', marginBottom: 12 },
+  btnTextAmber: { color: '#F59E0B', fontFamily: 'Courier', fontSize: 12, fontWeight: 'bold' },
+  btnOutlineDanger: { flexDirection: 'row', borderWidth: 1, borderColor: '#EF4444', backgroundColor: 'rgba(239, 68, 68, 0.1)', padding: 14, borderRadius: 6, alignItems: 'center', justifyContent: 'center', marginBottom: 12 },
+  btnTextDanger: { color: '#EF4444', fontFamily: 'Courier', fontSize: 12, fontWeight: 'bold' },
+
 });

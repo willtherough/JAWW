@@ -3,8 +3,13 @@
 // Handles both Real Bluetooth connections and Simulation testing.
 
 import BluetoothService from './BluetoothService';
+import { atob } from 'react-native-quick-base64';
 import { createCard } from '../model/Schema';
-import { verifySignature } from '../model/Security'; // Corrected from 'Crypto' to match your project
+import { signData, getOrGenerateKeys } from '../model/Security';
+import { Buffer } from 'buffer'; // Corrected from 'Crypto' to match your project
+
+import { signData, getOrGenerateKeys } from '../model/Security';
+import { Buffer } from 'buffer';
 
 // --- 1. THE MAIN ENTRY POINT ---
 export const grabCardFromDevice = async (device, onProgress, onComplete) => {
@@ -90,6 +95,31 @@ const finishDownload = async (device, chunks, total, callback) => {
       fullJson += chunks[i];
     }
     const card = JSON.parse(fullJson);
+
+    // --- FIX: SEND ACKNOWLEDGEMENT ---
+    const myHandle = BluetoothService.userHandle || 'Unknown';
+    const timestamp = Date.now();
+    const receipt = `${card.id}:${timestamp}:${myHandle}`;
+    const signature = await signData(receipt);
+    const keys = await getOrGenerateKeys();
+
+    if (signature && keys) {
+        const ackData = { receipt, signature, publicKey: keys.publicKey };
+        const ackString = `REQ:ACK:${JSON.stringify(ackData)}`;
+        const ackPayload = Buffer.from(ackString).toString('base64');
+        
+        try {
+            await device.writeCharacteristicWithoutResponseForService(
+                '0000CC00-0000-1000-8000-00805F9B34FB',
+                '0000CC01-0000-1000-8000-00805F9B34FB',
+                ackPayload
+            );
+            console.log(`>> RECEIVER: Sent signed ACK for ${card.id}`);
+        } catch (e) {
+            console.warn(">> RECEIVER: Failed to send ACK.", e);
+        }
+    }
+    // --- END FIX ---
 
     await device.cancelConnection();
     BluetoothService.updateState('IDLE');

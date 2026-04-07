@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { 
   Modal, 
   View, 
@@ -8,14 +8,22 @@ import {
   StyleSheet, 
   SafeAreaView, 
   StatusBar,
-  KeyboardAvoidingView,
-  Platform
+  Platform,
+  ActivityIndicator,
+  Alert
 } from 'react-native';
-import SearchBar from './SearchBar'; // Ensure SearchBar.js is in /components
+import SearchBar from './SearchBar';
+import { getAllEvents, getCardsByEvent, deleteEvent } from '../model/database';
 
-// UPDATED: Added 'onNavigate' to props
-export default function OracleModal({ visible, onClose, masterLibrary = [], funLibrary = [], onSelect, onNavigate }) {
+export default function OracleModal({ visible, onClose, masterLibrary = [], funLibrary = [], onSelect, onNavigate, onEndEvent, refreshTrigger }) {
   const [query, setQuery] = useState('');
+  
+  // --- NEW: EVENT STATE ---
+    const [activeTab, setActiveTab] = useState('TOPICS'); // 'TOPICS' or 'ASSEMBLY'
+  const [events, setEvents] = useState([]);
+  const [activeEventCards, setActiveEventCards] = useState(null); // Null = not looking at an event
+  const [activeEventId, setActiveEventId] = useState(null); // Keep track of the active event ID
+  const [isLoadingEvents, setIsLoadingEvents] = useState(false);
 
   const MASTER_TAGS = [
     'MEDICAL', 'SURVIVAL', 'TECH', 'PHYSIOLOGY', 
@@ -30,10 +38,73 @@ export default function OracleModal({ visible, onClose, masterLibrary = [], funL
 
   const library = [...masterLibrary, ...funLibrary];
 
-  // --- INTERNAL FILTER LOGIC (UPGRADED) ---
+  // --- NEW: FETCH EVENTS ON MOUNT ---
+  useEffect(() => {
+    if (visible) {
+      loadEvents();
+    } else {
+      // Reset when closed
+      setActiveEventCards(null);
+      setActiveEventId(null); // Reset active event ID
+      setQuery('');
+      setActiveTab('TOPICS');
+    }
+  }, [visible]);
+
+  useEffect(() => {
+    if (visible && activeEventId) {
+        handleOpenEvent(activeEventId);
+    }
+  }, [refreshTrigger]);
+
+  const loadEvents = async () => {
+    setIsLoadingEvents(true);
+    const dbEvents = await getAllEvents();
+    setEvents(dbEvents);
+    setIsLoadingEvents(false);
+  };
+
+  const handleOpenEvent = async (eventId) => {
+    setIsLoadingEvents(true);
+    setActiveEventId(eventId); // Set the active event ID
+    const cards = await getCardsByEvent(eventId);
+    setActiveEventCards(cards);
+    setIsLoadingEvents(false);
+  };
+
+  const handleDeleteEvent = (eventId) => {
+    Alert.alert(
+      "Delete Assembly",
+      "Are you sure you want to delete this assembly and all its intel?",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: async () => {
+            await deleteEvent(eventId);
+            loadEvents();
+          },
+        },
+      ]
+    );
+    };
+
+  // --- INTERNAL FILTER LOGIC ---
   const results = useMemo(() => {
+    // If we are looking inside an event folder, only filter those specific cards
+    if (activeEventCards) {
+        const q = query.toLowerCase().trim();
+        if (!q) return activeEventCards;
+        return activeEventCards.filter(card => 
+            card.title.toLowerCase().includes(q) || 
+            (card.topic && card.topic.toLowerCase().includes(q))
+        );
+    }
+
+    // Otherwise, do the standard global library search
     const q = query.toLowerCase().trim();
-    if (!q) return []; // Nothing to show if query is empty
+    if (!q) return [];
 
     const source = MASTER_TAGS.map(t => t.toLowerCase()).includes(q) 
         ? masterLibrary 
@@ -47,20 +118,40 @@ export default function OracleModal({ visible, onClose, masterLibrary = [], funL
         (card.tags && card.tags.some(t => t.toLowerCase().includes(q))) ||
         (card.keywords && card.keywords.some(k => k.toLowerCase().includes(q)))
     );
-  }, [library, query, masterLibrary, funLibrary]);
-  // --- RENDER ITEM ---
-  const renderItem = ({ item }) => (
+  }, [library, query, masterLibrary, funLibrary, activeEventCards]);
+
+
+  // --- RENDER ITEMS ---
+  const renderCardItem = ({ item }) => (
     <TouchableOpacity 
       style={styles.resultItem}
-      onPress={() => onSelect(item)} // Trigger selection
+      onPress={() => onSelect(item)} 
     >
       <View style={styles.resultHeader}>
         <Text style={styles.resultTitle}>{item.title}</Text>
-        <Text style={styles.resultCategory}>{item.category || 'INTEL'}</Text>
+        <Text style={styles.resultCategory}>{item.topic || item.category || 'INTEL'}</Text>
       </View>
       <Text numberOfLines={2} style={styles.resultPreview}>
         {item.body}
       </Text>
+    </TouchableOpacity>
+  );
+
+  const renderEventFolder = ({ item }) => (
+    <TouchableOpacity 
+      style={styles.folderItem}
+      onPress={() => handleOpenEvent(item.id)} 
+      onLongPress={() => handleDeleteEvent(item.id)}
+    >
+      <View style={styles.folderHeader}>
+        <Text style={styles.folderIcon}>{item.is_umpire === 1 ? '👑' : '📁'}</Text>
+        <View>
+          <Text style={styles.folderTitle}>{item.name}</Text>
+          <Text style={styles.folderDate}>
+             {new Date(item.timestamp * 1000).toLocaleDateString()} // ID: {item.id.split(':')[1]}
+          </Text>
+        </View>
+      </View>
     </TouchableOpacity>
   );
 
@@ -71,8 +162,21 @@ export default function OracleModal({ visible, onClose, masterLibrary = [], funL
         
         {/* HEADER */}
         <View style={styles.header}>
-          <Text style={styles.headerTitle}>ORACLE ENGINE</Text>
-          <Text style={styles.headerStatus}>// ONLINE</Text>
+          <Text style={styles.headerTitle}>
+            {activeEventCards ? '// ASSEMBLY DEBRIEF' : 'ORACLE ENGINE'}
+          </Text>
+          {activeEventCards ? (
+            <View style={{flexDirection: 'row'}}>
+                <TouchableOpacity onPress={() => onEndEvent()}>
+                    <Text style={[styles.headerStatus, {color: '#ff0000', marginRight: 10}]}>[ END EVENT ]</Text>
+                </TouchableOpacity>
+                <TouchableOpacity onPress={() => setActiveEventCards(null)}>
+                  <Text style={styles.headerStatus}>[ CLOSE FOLDER ]</Text>
+                </TouchableOpacity>
+            </View>
+          ) : (
+            <Text style={styles.headerStatus}>// ONLINE</Text>
+          )}
         </View>
 
         {/* SEARCH INPUT */}
@@ -86,75 +190,107 @@ export default function OracleModal({ visible, onClose, masterLibrary = [], funL
 
         {/* CONTENT AREA */}
         <View style={styles.content}>
-            {query.trim() === '' ? (
-                // --- EMPTY STATE: BASIC EDUCATION SUBJECTS ---
-                <View style={styles.emptyState}>
-                    <Text style={styles.sectionTitle}>// CORE KNOWLEDGE</Text>
-                    <View style={styles.tagCloud}>
-                        {MASTER_TAGS.map(tag => (
-                            <TouchableOpacity 
-                                key={tag} 
-                                style={styles.tagPill}
-                                onPress={() => setQuery(tag)}
-                            >
-                                <Text style={styles.tagText}>{tag}</Text>
-                            </TouchableOpacity>
-                        ))}
-                    </View>
-
-                    <View style={{ height: 24 }} />
-
-                    <Text style={styles.sectionTitle}>// RECREATIONAL & SPECIAL INTEREST</Text>
-                    <View style={styles.tagCloud}>
-                        {FUN_TAGS.map(tag => (
-                            <TouchableOpacity 
-                                key={tag} 
-                                style={[styles.tagPill, { borderColor: '#33ff00' }]}
-                                onPress={() => setQuery(tag)} 
-                            >
-                                <Text style={[styles.tagText, { color: '#33ff00' }]}>{tag}</Text>
-                            </TouchableOpacity>
-                        ))}
-                    </View>
-                    <Text style={styles.statsText}>
-                        CORE NODES: {masterLibrary.length} | FUN NODES: {funLibrary.length}
-                    </Text>
-                </View>
-            ) : (
-                // --- SEARCH RESULTS ---
+            {isLoadingEvents ? (
+                <ActivityIndicator size="large" color="#00ffff" style={{marginTop: 50}} />
+            ) : activeEventCards ? (
+                // --- VIEWING INSIDE A FOLDER ---
                 <FlatList 
                     data={results}
                     keyExtractor={item => item.id}
-                    renderItem={renderItem}
+                    renderItem={renderCardItem}
+                    contentContainerStyle={{ paddingBottom: 20 }}
+                    keyboardShouldPersistTaps="handled"
+                    ListEmptyComponent={<Text style={styles.emptyText}>No intel found in this assembly.</Text>}
+                />
+            ) : query.trim() !== '' ? (
+                // --- VIEWING GLOBAL SEARCH RESULTS ---
+                <FlatList 
+                    data={results}
+                    keyExtractor={item => item.id}
+                    renderItem={renderCardItem}
                     contentContainerStyle={{ paddingBottom: 20 }}
                     keyboardShouldPersistTaps="handled"
                 />
+            ) : (
+                // --- DEFAULT EMPTY STATE (TABS) ---
+                <View style={{flex: 1}}>
+                    {/* Tab Navigation */}
+                    <View style={styles.tabContainer}>
+                        <TouchableOpacity 
+                            style={[styles.tabBtn, activeTab === 'TOPICS' && styles.activeTabBtn]}
+                            onPress={() => setActiveTab('TOPICS')}
+                        >
+                            <Text style={[styles.tabText, activeTab === 'TOPICS' && styles.activeTabText]}>GLOBAL TOPICS</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity 
+                            style={[styles.tabBtn, activeTab === 'ASSEMBLY' && styles.activeTabBtn]}
+                            onPress={() => setActiveTab('ASSEMBLY')}
+                        >
+                            <Text style={[styles.tabText, activeTab === 'ASSEMBLY' && styles.activeTabText]}>ASSEMBLY</Text>
+                        </TouchableOpacity>
+                    </View>
+
+                    {activeTab === 'TOPICS' ? (
+                        <View style={styles.emptyState}>
+                            <Text style={styles.sectionTitle}>// CORE KNOWLEDGE</Text>
+                            <View style={styles.tagCloud}>
+                                {MASTER_TAGS.map(tag => (
+                                    <TouchableOpacity 
+                                        key={tag} 
+                                        style={styles.tagPill}
+                                        onPress={() => setQuery(tag)}
+                                    >
+                                        <Text style={styles.tagText}>{tag}</Text>
+                                    </TouchableOpacity>
+                                ))}
+                            </View>
+
+                            <View style={{ height: 24 }} />
+
+                            <Text style={styles.sectionTitle}>// RECREATIONAL & SPECIAL INTEREST</Text>
+                            <View style={styles.tagCloud}>
+                                {FUN_TAGS.map(tag => (
+                                    <TouchableOpacity 
+                                        key={tag} 
+                                        style={[styles.tagPill, { borderColor: '#33ff00' }]}
+                                        onPress={() => setQuery(tag)} 
+                                    >
+                                        <Text style={[styles.tagText, { color: '#33ff00' }]}>{tag}</Text>
+                                    </TouchableOpacity>
+                                ))}
+                            </View>
+                            <Text style={styles.statsText}>
+                                CORE NODES: {masterLibrary.length} | FUN NODES: {funLibrary.length}
+                            </Text>
+                        </View>
+                    ) : (
+                        <FlatList 
+                            data={events}
+                            keyExtractor={item => item.id}
+                            renderItem={renderEventFolder}
+                            contentContainerStyle={{ paddingBottom: 20, paddingTop: 20 }}
+                            ListEmptyComponent={<Text style={styles.emptyText}>No assemblies recorded.</Text>}
+                        />
+                    )}
+                </View>
             )}
         </View>
 
-        {/* --- FOOTER NAVIGATION (NEW) --- */}
+        {/* --- FOOTER NAVIGATION --- */}
         <View style={styles.footer}>
-            {/* 1. DASHBOARD (Exit) */}
             <TouchableOpacity onPress={onClose} style={styles.footBtn}>
                 <Text style={styles.footText}>DASHBOARD</Text>
             </TouchableOpacity>
-
-            {/* 2. SCAN QR */}
             <TouchableOpacity onPress={() => onNavigate('scan')} style={styles.footBtn}>
                 <Text style={styles.footText}>SCAN QR</Text>
             </TouchableOpacity>
-
-            {/* 3. CREATE */}
             <TouchableOpacity onPress={() => onNavigate('create')} style={styles.footBtnMain}>
                 <Text style={styles.footTextMain}>+ CREATE</Text>
             </TouchableOpacity>
-
-            {/* 4. RADAR */}
             <TouchableOpacity onPress={() => onNavigate('radar')} style={styles.footBtn}>
                 <Text style={styles.footText}>RADAR</Text>
             </TouchableOpacity>
         </View>
-
       </SafeAreaView>
     </Modal>
   );
@@ -163,7 +299,7 @@ export default function OracleModal({ visible, onClose, masterLibrary = [], funL
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#050505', // Deep Black
+    backgroundColor: '#050505', 
     paddingTop: Platform.OS === 'android' ? StatusBar.currentHeight : 0,
     paddingBottom: Platform.OS === 'android' ? 20 : 0
   },
@@ -176,7 +312,7 @@ const styles = StyleSheet.create({
     borderBottomColor: '#111',
   },
   headerTitle: {
-    color: '#00ffff', // Cyan for Oracle
+    color: '#00ffff', 
     fontSize: 18,
     fontWeight: 'bold',
     fontFamily: 'Courier',
@@ -187,17 +323,37 @@ const styles = StyleSheet.create({
     fontFamily: 'Courier', 
     fontSize: 10 
   },
-  closeText: {
-    color: '#666',
-    fontFamily: 'Courier',
-    fontSize: 14,
-  },
   searchContainer: {
     paddingVertical: 10,
   },
   content: {
     flex: 1,
     paddingHorizontal: 20,
+  },
+  // --- TABS ---
+  tabContainer: {
+    flexDirection: 'row',
+    borderBottomWidth: 1,
+    borderBottomColor: '#222',
+    marginBottom: 20,
+  },
+  tabBtn: {
+    flex: 1,
+    paddingVertical: 15,
+    alignItems: 'center',
+  },
+  activeTabBtn: {
+    borderBottomWidth: 2,
+    borderBottomColor: '#00ffff',
+  },
+  tabText: {
+    color: '#666',
+    fontFamily: 'Courier',
+    fontSize: 12,
+    fontWeight: 'bold',
+  },
+  activeTabText: {
+    color: '#00ffff',
   },
   // --- RESULT ITEMS ---
   resultItem: {
@@ -230,9 +386,43 @@ const styles = StyleSheet.create({
     color: '#888',
     fontSize: 12,
   },
-  // --- EMPTY STATE ---
-  emptyState: {
+  // --- FOLDER ITEMS ---
+  folderItem: {
+    backgroundColor: '#0a0a0a',
+    marginBottom: 10,
+    padding: 15,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#333',
+  },
+  folderHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  folderIcon: {
+    fontSize: 24,
+    marginRight: 15,
+  },
+  folderTitle: {
+    color: '#fff',
+    fontWeight: 'bold',
+    fontSize: 16,
+    fontFamily: 'Courier',
+  },
+  folderDate: {
+    color: '#666',
+    fontSize: 10,
+    fontFamily: 'Courier',
+    marginTop: 4,
+  },
+  emptyText: {
+    color: '#666',
+    fontFamily: 'Courier',
+    textAlign: 'center',
     marginTop: 40,
+  },
+  // --- EMPTY STATE (TOPICS) ---
+  emptyState: {
     alignItems: 'center',
   },
   sectionTitle: {

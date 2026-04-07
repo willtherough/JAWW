@@ -80,5 +80,9 @@ export const startScanning = async (onDeviceFound) => {
 // 4. STOP
 export const stopRadar = () => {
     console.log(">> RADAR: Stopping.");
-    manager.stopDeviceScan();
+    try {
+        manager.stopDeviceScan();
+    } catch (e) {
+        console.warn(">> BleManager.stopDeviceScan() in Radar.js failed:", e);
+    }
 };

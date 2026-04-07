@@ -1,10 +1,10 @@
-// --- TOP OF FILE ---
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { 
   StyleSheet, View, Text, TouchableOpacity, FlatList, ScrollView,
   Modal, Alert, SafeAreaView, StatusBar, Image, Animated,
   Dimensions, Platform, Vibration, PermissionsAndroid, Pressable,
-  ActivityIndicator, TextInput, DeviceEventEmitter, ToastAndroid, LogBox, NativeModules 
+  ActivityIndicator, TextInput, DeviceEventEmitter, ToastAndroid, LogBox, NativeModules,
+  AppState, InteractionManager
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 // import { useUpdates } from 'expo-updates';
@@ -16,11 +16,12 @@ import { loadLibrary, saveLibrary, loadProfile, saveProfile, saveTrustedSource, 
 import { INITIAL_SEEDS } from './utils/SeedData';
 import { TOPICS } from './model/Definitions';
 import { MASTER_LIBRARY, funLibrary } from './services/library/';
-import { getOrGenerateKeys, signData } from './model/Security';
-import { initDB, batchInsertCards, insertOrReplaceCard, insertTransferRecord, getAllCards, getCardById, blockOperator, searchCards, fetchCards, trustNode } from './model/database';
+import { getOrGenerateKeys, signData, verifyChain } from './model/Security';
+import { initDB, batchInsertCards, insertOrReplaceCard, insertTransferRecord, getAllCards, getCardById, blockOperator, searchCards, fetchCards, getCategoryForSubject, trustNode, getOperatorStats, deleteCard, runQuery, queueCardForUmpire, getPendingUmpireSyncs, markUmpireQueueAsSynced } from './model/database';
 import BluetoothService from './services/BluetoothService';
-import { startServer, sendCardInChunks } from './services/PeripheralService'; // <--- ENGINE 4
-import { createCard, forkCard } from './model/Schema';
+import { startServer, sendCardInChunks, initiateHandshake, sendSyncPingBack } from './services/PeripheralService'; // <--- ENGINE 4
+import { setAdvertisedCard } from './services/BroadcastState';
+import { createCard, forkCard, buildLedgerEntry } from './model/Schema';
 
 // --- COMPONENT IMPORTS ---
 import CardDetailModal from './components/CardDetailModal';
@@ -31,6 +32,27 @@ import OracleModal from './components/OracleModal';
 import IdentityModal from './components/IdentityModal';
 import Onboarding from './components/Onboarding';
 import CardItem from './components/CardItem';
+import UmpireEventModal from './components/UmpireEventModal';
+import TacticalScanner from './components/TacticalScanner';
+import FlareBeacon from './components/FlareBeacon';
+import QRCode from 'react-native-qrcode-svg';
+import SyncStatusScreen from './components/SyncStatusScreen';
+
+
+const decodeVaultBitmask = (bitmask) => {
+    if (!bitmask) return null;
+    const tags = [];
+    
+    // Reverse the bitwise shift (1 << (catVal - 1))
+    if (bitmask & (1 << 0)) tags.push('[ FOOD ]');
+    if (bitmask & (1 << 1)) tags.push('[ EDUCATION ]');
+    if (bitmask & (1 << 2)) tags.push('[ FITNESS ]');
+    if (bitmask & (1 << 3)) tags.push('[ PROFESSIONAL ]');
+    if (bitmask & (1 << 4)) tags.push('[ FUN ]');
+    
+    return tags.length > 0 ? tags.join(' ') : null;
+};
+
 
 // --- CONFIGURATION ---
 LogBox.ignoreLogs(['Cannot read property \'addService\' of null']);
@@ -63,6 +85,76 @@ const getRankDisplay = (hops) => {
   if (hops > 5) return '🟡 SCOUT';
   return '🟢 ROOKIE';
 };
+
+const generateLedgerHash = (historyArray) => {
+    if (!historyArray || historyArray.length === 0) return '0';
+    
+    const historyString = JSON.stringify(
+        historyArray.map(h => ({ 
+            action: h.action || 'legacy_action',
+            from: h.from || h.fromKey || '',
+            to: h.to || h.userKey || '',
+            signature: h.signature || '' 
+        })).sort((a, b) => {
+            // BUG FIX: Removed Code Assist's nested backticks that created literal strings.
+            // We are now evaluating the actual data variables to sort deterministically.
+            const aStr = `${a.action}->${a.from}->${a.to}->${a.signature}`;
+            const bStr = `${b.action}->${b.from}->${b.to}->${b.signature}`;
+            return aStr.localeCompare(bStr);
+        })
+    );
+    
+    let hash = 0;
+    for (let i = 0; i < historyString.length; i++) {
+        const char = historyString.charCodeAt(i);
+        hash = ((hash << 5) - hash) + char;
+        hash |= 0; 
+    }
+    return String(hash);
+};
+
+const calculateTrueHops = (historyArray) => {
+    if (!Array.isArray(historyArray) || historyArray.length === 0) return 0;
+    
+    // With a verified chain, we just need to count the verified array length.
+    return historyArray.length;
+};
+
+export const mergeAndSortLedgers = (localHistory, incomingHistory) => {
+    // Ensure both inputs are valid arrays
+    const safeLocal = Array.isArray(localHistory) ? localHistory : [];
+    const safeIncoming = Array.isArray(incomingHistory) ? incomingHistory : [];
+
+    const combinedHistory = [...safeLocal, ...safeIncoming];
+    const uniqueEntries = new Map();
+
+    // Rule 2: Filter out exact duplicates using the signature string as the unique ID
+    combinedHistory.forEach(entry => {
+        if (entry && entry.signature) {
+            if (!uniqueEntries.has(entry.signature)) {
+                uniqueEntries.set(entry.signature, entry);
+            }
+        }
+    });
+
+    // Rule 2: Deterministically Sort the final combined array chronologically by the timestamp field
+    const sortedHistory = Array.from(uniqueEntries.values()).sort((a, b) => {
+        const timeA = new Date(a.timestamp || 0).getTime();
+        const timeB = new Date(b.timestamp || 0).getTime();
+        
+        // If timestamps are perfectly identical, fallback to a string comparison 
+        // of the signatures to guarantee a 100% deterministic zipper across all devices.
+        if (timeA === timeB) {
+            return a.signature.localeCompare(b.signature);
+        }
+        
+        return timeA - timeB;
+    });
+
+    return sortedHistory;
+};
+
+
 
 // --- PERMISSIONS ---
 const requestPermissions = async () => {
@@ -100,8 +192,8 @@ const TransferRequestModal = ({ visible, request, onAccept, onDeny }) => {
                         Operator <Text style={{color: '#f59e0b', fontWeight: 'bold'}}>{requester}</Text> is requesting the following card:
                     </Text>
                     <View style={[styles.card, {backgroundColor: '#222', marginTop: 15}]}>
-                        <Text style={styles.cardTitle}>{card.title}</Text>
-                        <Text style={{color:'#666', fontSize:10, fontFamily:'Courier'}}>ID: {card.id.substring(0,8)}...</Text>
+                        <Text style={styles.cardTitle}>{card.title || "Subject Request"}</Text>
+                        <Text style={{color:'#666', fontSize:10, fontFamily:'Courier'}}>ID: {card.id ? card.id.substring(0,8) : "UNK"}...</Text>
                     </View>
                     <View style={{flexDirection: 'row', justifyContent: 'space-between', marginTop: 20}}>
                         <TouchableOpacity onPress={onDeny} style={[styles.btnOutline, {flex: 1, marginRight: 10, borderColor: '#ff0000', marginTop: 0}]}>
@@ -117,51 +209,118 @@ const TransferRequestModal = ({ visible, request, onAccept, onDeny }) => {
     );
 };
 
+const formatKey = (key) => {
+    if (!key || key === 'Unknown') return 'UNKNOWN';
+    if (key === 'Local Generation') return 'LOCAL GENERATION';
+    if (key.length > 20) return `${key.substring(0, 8)}...${key.substring(key.length - 8)}`;
+    return key;
+};
+
 const ChainModal = ({ visible, card, onClose, currentUserHandle }) => {
     if (!visible || !card) return null;
-    const formatDate = (val) => {
-        try { return new Date(val).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }); } 
-        catch (e) { return 'Unknown Date'; }
-    };
-    const genesisAuthor = card.originalAuthor || (card.genesis ? card.genesis.author_id : card.author);
+
     return (
         <Modal visible={visible} transparent animationType="slide">
             <View style={styles.modalOverlay}>
-                <View style={styles.modalBox}>
+                <View style={[styles.modalBox, { maxHeight: '80%', width: '90%' }]}>
                     <Text style={styles.modalTitle}>CHAIN OF CUSTODY</Text>
-                    <ScrollView style={{maxHeight: 400}}>
-                        <View style={{flexDirection:'row', marginBottom: 20}}>
-                             <View style={{width: 30, alignItems:'center'}}><Text style={{fontSize:16}}>👑</Text><View style={{width: 2, height: 40, backgroundColor: '#333', marginTop: 5}} /></View>
-                             <View style={{marginLeft: 10, flex: 1}}><Text style={{color:'#f59e0b', fontWeight:'bold', fontSize:12}}>ORIGIN</Text><Text style={{color:'#fff', fontWeight:'bold', fontSize:16}}>{genesisAuthor}</Text></View>
-                        </View>
-                        {(card.history || []).map((node, i) => {
-                            const isFork = node.action === 'FORKED';
-                            const displayUser = node.user || node.user_id || genesisAuthor; 
-                            let actionText = `${node.action} by ${displayUser}`;
-                            if (node.action === 'CREATED') actionText = `Created by ${displayUser}`;
-                            else if (node.action === 'RECEIVED') actionText = `Received from ${displayUser}`;
-                            else if (node.action === 'TRANSFER') {
-                                const fromUser = node.from || card.genesis.author_id;
-                                const toUser = node.user;
-                                actionText = (toUser === currentUserHandle) ? `Received from ${fromUser}` : (fromUser === currentUserHandle) ? `Shared with ${toUser}` : `Transferred from ${fromUser} to ${toUser}`;
+                    <ScrollView style={{ width: '100%', maxHeight: 500 }} contentContainerStyle={{ paddingBottom: 20 }}>
+                        {card.history && card.history.map((entry, index) => {
+                            const isGenesis = index === 0 || entry.action === 'CREATE';
+                            const isFork = entry.action === 'FORK' || entry.action === 'FORKED';
+                            const isSubmitted = entry.action === 'SUBMITTED';
+                            const isAnswered = entry.action === 'ANSWERED';
+                            const isAskedMesh = entry.action === 'ASKED_MESH';
+                            const isRespondedMesh = entry.action === 'RESPONDED_MESH';
+                            
+                            let actionLabel = "Transferred to";
+                            let actionColor = "#38BDF8"; 
+                            let iconName = isGenesis ? "hexagon" : (isFork ? "edit-3" : "arrow-down-circle");
+
+                            if (isGenesis) {
+                                actionLabel = card.topic === 'human/question' ? "Asked by" : "Created by";
+                                actionColor = "#10B981"; 
+                            } else if (isFork) {
+                                actionLabel = (card.topic === 'human/answer' || card.topic === 'human/question') ? "Answered by" : "Forked by";
+                                actionColor = "#F59E0B"; 
+                            } else if (isSubmitted) {
+                                actionLabel = `Submitted to JAWW Event: ${entry.event || 'Mission'}`;
+                                actionColor = "#A855F7"; 
+                                iconName = "shield";
+                            } else if (isAskedMesh) {
+                                actionLabel = "Asked the mesh";
+                                actionColor = "#F59E0B";
+                                iconName = "message-circle";
+                            } else if (isRespondedMesh || isAnswered) {
+                                actionLabel = "Responded to the mesh";
+                                actionColor = "#F59E0B";
+                                iconName = "message-square";
                             }
+
+                            const fromKey = entry.from || entry.sender_id || entry.fromKey || "Local Generation";
+                            const toKey = entry.to || entry.receiver_id || entry.userKey || entry.user || entry.handle;
+                            
+                            // Determine the focal handle based on the action flow
+                            // --- DETERMINISTIC IDENTITY RESOLUTION ---
+                            // Check every possible field where a decentralized handle might be stored
+                            let displayUser = entry.operator_handle || 
+                                              entry.senderHandle || 
+                                              entry.user || 
+                                              entry.handle || 
+                                              (entry.from && entry.from.length < 20 ? entry.from : null) || 
+                                              "UNKNOWN OPERATOR";
+
+                            // Specific overrides for Mesh/Umpire actions
+                            if (isAskedMesh || isSubmitted || isRespondedMesh) {
+                                displayUser = entry.senderHandle || 
+                                              entry.operator_handle || 
+                                              (entry.from && entry.from.length < 20 ? entry.from : "UNKNOWN OPERATOR");
+                            } else if (!isGenesis && !isFork) {
+                                // Default TRANSFER block: Prioritize the recipient!
+                                displayUser = entry.recipientHandle || 
+                                              (entry.to && entry.to.length < 20 ? entry.to : null) || 
+                                              "UNKNOWN OPERATOR";
+                            }
+
                             return (
-                                <View key={i} style={{flexDirection:'row', marginBottom: 20}}>
-                                    <View style={{width: 30, alignItems:'center'}}><View style={{width: 10, height: 10, borderRadius: 5, backgroundColor: isFork ? '#f59e0b' : '#333', borderWidth:1, borderColor:'#fff'}} /><View style={{width: 2, height: 40, backgroundColor: '#333', marginTop: 5}} /></View>
-                                    <View style={{marginLeft: 10, flex: 1}}>
-                                        <Text style={{color: isFork ? '#f59e0b' : '#fff', fontWeight:'bold'}}>{actionText}</Text>
-                                        <Text style={{color:'#666', fontSize:12, fontFamily:'Courier', marginTop: 2}}>{formatDate(node.date || node.timestamp)}</Text>
-                                        {node.note && <Text style={{color:'#ccc', fontSize:12, fontStyle:'italic', marginTop:2}}>"{node.note}"</Text>}
+                                <View key={index} style={styles.timelineNode}>
+                                    {index !== 0 && (
+                                        <Feather name="arrow-down" size={20} color="#475569" style={{ marginBottom: 12 }} />
+                                    )}
+                        
+                                    <View style={styles.entryCard}>
+                                        <Feather name={iconName} size={20} color={actionColor} style={{ marginBottom: 8 }} />
+                                        
+                                        <Text style={[styles.historyAction, { color: actionColor }]}>
+                                            {actionLabel.toUpperCase()}
+                                        </Text>
+                                        <Text style={styles.historyUser}>
+                                            {displayUser}
+                                        </Text>
+                                        
+                                        <View style={styles.keyContainer}>
+                                            {isFork || isGenesis ? (
+                                                <Text style={styles.historyKey}>KEY: {formatKey(fromKey)}</Text>
+                                            ) : (
+                                                <>
+                                                    {isSubmitted && <Text style={[styles.historyKey, {color: '#A855F7', marginBottom: 4}]}>UMPIRED BY: {entry.umpire || entry.user || entry.handle || 'UNKNOWN'}</Text>}
+                                                    <Text style={styles.historyKey}>FROM: {entry.senderHandle || (entry.from && entry.from.length < 20 ? entry.from : 'UNKNOWN')}</Text>
+                                                    <Text style={styles.historyKey}>PUBLIC KEY: {formatKey(entry.fromKey || entry.sender_id || (entry.from && entry.from.length > 20 ? entry.from : ''))}</Text>
+                                                    <Text style={styles.historyKey}>TO:   {entry.recipientHandle || entry.user || entry.handle || (entry.to && entry.to.length < 20 ? entry.to : 'UNKNOWN')}</Text>
+                                                    <Text style={styles.historyKey}>PUBLIC KEY: {formatKey(entry.to || entry.userKey || entry.receiver_id || '')}</Text>
+                                                </>
+                                            )}
+                                        </View>
+                                        
+                                        <Text style={styles.historyDate}>
+                                            {new Date(entry.timestamp).toLocaleString()}
+                                        </Text>
                                     </View>
                                 </View>
                             );
                         })}
-                        <View style={{flexDirection:'row', marginBottom: 20}}>
-                             <View style={{width: 30, alignItems:'center'}}><View style={{width: 12, height: 12, borderRadius: 6, backgroundColor: '#00ff00', borderWidth:1, borderColor:'#fff'}} /></View>
-                             <View style={{marginLeft: 10, flex: 1}}><Text style={{color:'#00ff00', fontWeight:'bold', fontSize:12}}>CURRENT HOLDER</Text><Text style={{color:'#fff'}}>Held by You</Text></View>
-                        </View>
                     </ScrollView>
-                    <TouchableOpacity onPress={onClose} style={styles.btnOutline}><Text style={styles.btnTextGray}>CLOSE LEDGER</Text></TouchableOpacity>
+                    <TouchableOpacity onPress={onClose} style={[styles.btnOutline, {marginTop: 10}]}><Text style={styles.btnTextGray}>CLOSE LEDGER</Text></TouchableOpacity>
                 </View>
             </View>
         </Modal>
@@ -213,20 +372,27 @@ const ContextModal = ({ visible, card, onClose, onSave }) => {
     if (!visible) return null;
     return (
         <Modal visible={visible} transparent animationType="slide">
-            <View style={styles.modalOverlay}><View style={styles.modalBox}><Text style={styles.modalTitle}>ADD CONTEXT (FORK)</Text><TextInput style={styles.contextInput} multiline placeholder="What are you adding?" placeholderTextColor="#444" value={note} onChangeText={setNote}/><TouchableOpacity onPress={() => onSave(note)} style={styles.btnPrimary}><Text style={styles.btnTextBlack}>SIGN & FORK</Text></TouchableOpacity><TouchableOpacity onPress={onClose} style={styles.btnCancel}><Text style={styles.btnTextGray}>CANCEL</Text></TouchableOpacity></View></View>
+            <View style={styles.modalOverlay}><View style={styles.modalBox}><Text style={styles.modalTitle}>OPERATOR RESPONSE (FORK)</Text><TextInput style={styles.contextInput} multiline placeholder="What are you adding?" placeholderTextColor="#444" value={note} onChangeText={setNote}/><TouchableOpacity onPress={() => onSave(note)} style={styles.btnPrimary}><Text style={styles.btnTextBlack}>SIGN & FORK</Text></TouchableOpacity><TouchableOpacity onPress={onClose} style={styles.btnCancel}><Text style={styles.btnTextGray}>CANCEL</Text></TouchableOpacity></View></View>
         </Modal>
     );
 };
 
-const HandshakeModal = ({ visible, peer, onClose, onGrab, onBrowse, isLoading }) => {
+const HandshakeModal = ({ visible, peer, category, onClose, onGrab, onBrowse, isLoading }) => {
     if (!visible || !peer) return null;
     const offer = peer.offer || {};
     const hasPayload = !!offer.title;
-    const category = offer.topic ? offer.topic.split('/')[1] || offer.topic : 'general';
-    const icon = getCategoryIcon(category);
+
+    // SAFEGUARD: Ensure topic parsing never crashes the render
+    const safeTopic = offer.topic || 'human/general';
+    const displayCategory = category === 'resolving...' 
+        ? 'resolving...'
+        : category || safeTopic.split('/')[1] || safeTopic;
+    
+    const icon = getCategoryIcon(displayCategory);
     const sourceName = peer.name || peer.handle || "UNKNOWN SIGNAL";
     const sourceRank = getRankDisplay(offer.hops);
     const lastUpdate = new Date(peer.lastSeen || Date.now()).toLocaleTimeString();
+    const vaultTags = decodeVaultBitmask(peer.categoryBitmask);
 
     return (
         <Modal visible={visible} transparent animationType="fade">
@@ -238,18 +404,48 @@ const HandshakeModal = ({ visible, peer, onClose, onGrab, onBrowse, isLoading })
                     </View>
                     <View style={styles.divider} />
                     {hasPayload ? (
-                        <View style={{flex: 1}}>
+                        // FIX: Removed flex: 1 and replaced with width 100% to prevent layout collapse
+                        <View style={{ width: '100%' }}>
                             <View style={styles.payloadHeader}>
                                 <Text style={styles.payloadIcon}>{icon}</Text>
-                                <View style={{marginLeft: 10, flex: 1}}><Text style={styles.payloadTitle}>{offer.title}</Text><Text style={styles.payloadCategory}>{category.toUpperCase()} • HOPS: {offer.hops || 0}</Text></View>
+                                <View style={{marginLeft: 10, flex: 1}}>
+                                    <Text style={styles.payloadTitle}>{offer.title}</Text>
+                                    <Text style={styles.payloadCategory}>{(displayCategory || 'GENERAL').toUpperCase()} • HOPS: {offer.hops || 0}</Text>
+                                </View>
                             </View>
                             <ScrollView style={styles.payloadBodyBox}>
-                                <View style={{alignItems: 'center', padding: 20}}>
-                                    <Text style={{color: '#666', fontSize: 12, textTransform: 'uppercase', fontFamily: 'Courier'}}>Card Category</Text>
-                                    <Text style={{color: '#fff', fontSize: 20, textAlign: 'center', fontFamily: 'Courier', fontWeight: 'bold', marginTop: 5}}>{category.toUpperCase()}</Text>
-                                </View>
+                                {displayCategory === 'resolving...' ? (
+                                    <View style={{alignItems: 'center', padding: 20}}>
+                                        <ActivityIndicator color="#00ff00" />
+                                        <Text style={{color: '#666', fontSize: 12, textTransform: 'uppercase', fontFamily: 'Courier', marginTop: 10}}>RESOLVING CATEGORY...</Text>
+                                    </View>
+                                ) : category ? (
+                                    <View style={{alignItems: 'center', padding: 20}}>
+                                        <Text style={{color: '#666', fontSize: 12, textTransform: 'uppercase', fontFamily: 'Courier'}}>Card Category</Text>
+                                        <Text style={{color: '#fff', fontSize: 20, textAlign: 'center', fontFamily: 'Courier', fontWeight: 'bold', marginTop: 5}}>{displayCategory.toUpperCase()}</Text>
+                                    </View>
+                                ) : (
+                                    <View style={{alignItems: 'center', padding: 20}}>
+                                        <Text style={{color: '#666', fontSize: 12, textAlign: 'center', fontFamily: 'Courier', paddingHorizontal: 10}}>You can add your own context to this card or your own spin by pushing 'Fork' in the card.</Text>
+                                    </View>
+                                )}
                             </ScrollView>
-                            <Text style={styles.verifText}>AUTHOR: {offer.author || 'ANONYMOUS'} • ID: {offer.id ? offer.id.substring(0,8) : '???'}</Text>
+                            {/* STEP 1: The Anonymous Text Swap */}
+                            <Text style={styles.verifText}>
+                                {offer.id 
+                                    ? `AUTHOR: ${offer.author || 'ANONYMOUS'} • ID: ${offer.id.substring(0,8)}` 
+                                    : "Check the JAWW default cards for useful info."}
+                            </Text>
+
+                            {/* STEP 2: The Vault Bitmask UI */}
+                            {vaultTags && (
+                                <View style={{ alignItems: 'center', marginTop: 10, marginBottom: 5 }}>
+                                    <Text style={{ color: '#00ff00', fontSize: 10, fontFamily: 'Courier', fontWeight: 'bold' }}>
+                                        VAULT CONTAINS: {vaultTags}
+                                    </Text>
+                                </View>
+                            )}
+
                             <View style={styles.actionGrid}>
                                 <TouchableOpacity onPress={() => onGrab(offer)} style={[styles.btnActionPrimary, isLoading && {opacity:0.5}]} disabled={isLoading}>
                                     {isLoading ? <ActivityIndicator color="#000"/> : <Text style={styles.btnTextBlack}>⬇ GRAB CARD</Text>}
@@ -296,8 +492,64 @@ const migrateAsyncStorageToSQLite = async () => {
     } catch (error) { console.error(">> FATAL ERROR during migration:", error); }
 };
 
+const broadcastGossipSync = (card, myHandle) => {
+    try {
+        if (!card || !card.history) return;
+        const handles = new Set();
+        card.history.forEach(e => {
+            if (e.senderHandle) handles.add(e.senderHandle);
+            if (e.recipientHandle) handles.add(e.recipientHandle);
+        });
+        const uniqueHandles = [...handles].filter(h => h && h !== myHandle && h !== "Unknown" && h !== "Unknown Operator");
+        if (uniqueHandles.length > 0) {
+            BluetoothService.pingTargetsForSync(card.id, uniqueHandles, myHandle);
+        }
+    } catch(err) {
+        console.error(">> GOSSIP EXCEPTION:", err);
+    }
+};
+
 // --- MAIN APP COMPONENT ---
 export default function App() {
+
+  const handleEndEvent = () => {
+    Alert.alert(
+      "Terminate Event?",
+      "This will close the connection and drop all participants.",
+      [
+        { text: "Cancel", style: "cancel" },
+        { 
+          text: "End Event", 
+          style: "destructive", 
+          onPress: async () => {
+            try {
+                // 1. Wipe database memory
+                await AsyncStorage.removeItem('@jaww_active_event_id');
+                await AsyncStorage.removeItem('@jaww_event_start');
+                
+                // 2. Kill the radio if Host
+                if (isUmpireMode) {
+                    BluetoothService.stopBroadcasting();
+                }
+                
+                // 3. Update the UI
+                setIsOracleVisible(false);
+                setActiveUmpireEvent(null);
+                setEventOverMessage("EVENT TERMINATED.");
+                setTimeout(() => setEventOverMessage(null), 5000);
+                
+            } catch (e) {
+                console.error(">> EVENT END FAILED:", e);
+                Alert.alert("Error", "Could not cleanly sever the connection.");
+            }
+          }
+        }
+      ]
+    );
+  };
+
+  const [showSyncFlare, setShowSyncFlare] = useState(false);
+  const [isHostDashboardVisible, setIsHostDashboardVisible] = useState(false); // For Step 2
   const [isDbReady, setIsDbReady] = useState(false);
   const [hasPermissions, setHasPermissions] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
@@ -311,6 +563,7 @@ export default function App() {
   const [activePeer, setActivePeer] = useState(null); 
   const [selectedCard, setSelectedCard] = useState(null); 
   const [cardToFork, setCardToFork] = useState(null); 
+  const [isContextModalVisible, setIsContextModalVisible] = useState(false); 
   const [chainCard, setChainCard] = useState(null); 
   const [isCreateVisible, setIsCreateVisible] = useState(false);
   const [isScannerVisible, setIsScannerVisible] = useState(false); 
@@ -327,11 +580,75 @@ export default function App() {
   const [targetPeripheralId, setTargetPeripheralId] = useState(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [meshSearchQuery, setMeshSearchQuery] = useState('');
+  const [activePeerCategory, setActivePeerCategory] = useState(null);
+  const [isUmpireMode, setIsUmpireMode] = useState(false);
+  const [gamePhase, setGamePhase] = useState('INIT');
+  const [eventStartTime, setEventStartTime] = useState(null);
+  const [leaderboard, setLeaderboard] = useState([]);
+  const [submittedEventTimes, setSubmittedEventTimes] = useState([]);
+  const [activeUmpireEvent, setActiveUmpireEvent] = useState(null);
+  const [isUmpireEventModalVisible, setIsUmpireEventModalVisible] = useState(false);
+  const [refreshTrigger, setRefreshTrigger] = useState(0);
+  const [isHostQRVisible, setIsHostQRVisible] = useState(false);
+  const [activeConnections, setActiveConnections] = useState([]);
+  const [eventOverMessage, setEventOverMessage] = useState(null);
+  const [lastSeenUmpireId, setLastSeenUmpireId] = useState(null);
+  const [isSyncScreenVisible, setIsSyncScreenVisible] = useState(false);
+  const [syncBadges, setSyncBadges] = useState({}); // Holds { cardId: numberOfNewEntries }
+  
+  // --- RENDER-THROTTLE REFS FOR RADAR ---
+  const deviceBufferRef = useRef(new Map());
+  const updateIntervalRef = useRef(null);
   
   
   // --- REFACTOR: RADAR FILTER REF ---
   const [radarFilter, setRadarFilter] = useState(null);
   const radarFilterRef = useRef(null);
+  
+  // NEW: Synchronous lock to prevent the GATT Bomb
+  const umpireSyncLockRef = useRef(new Set()); 
+
+  // --- SHADOW HOP SYNCHRONIZER ---
+  // This effect monitors when the app is brought to the foreground.
+  // It refreshes the UI cards from the DB without crashing the background thread.
+  const appStateRef = useRef(AppState.currentState);
+
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', async (nextAppState) => {
+      // ONLY trigger if the app is truly transitioning from background/inactive to active
+      if (
+        appStateRef.current.match(/inactive|background/) && 
+        nextAppState === 'active'
+      ) {
+        console.log(">> UI: Foreground detected. Synchronizing Shadow Hops from SQLite...");
+        try {
+          const freshCards = await getAllCards();
+          setCards(freshCards);
+        } catch (err) {
+          console.error(">> UI: Failed to sync shadow hops:", err);
+        }
+      }
+      appStateRef.current = nextAppState;
+    });
+
+    return () => {
+      subscription.remove();
+    };
+  }, []);
+
+  useEffect(() => {
+    const resolveCategory = async () => {
+      if (activePeer && activePeer.subject) {
+        setActivePeerCategory('resolving...');
+        const category = await getCategoryForSubject(activePeer.subject);
+        setActivePeerCategory(category);
+      } else {
+        setActivePeerCategory(null);
+      }
+    };
+  
+    resolveCategory();
+  }, [activePeer]);
 
   // Keep Ref synced with State
   useEffect(() => {
@@ -347,6 +664,200 @@ export default function App() {
 
   // --- GLOBAL EVENT LISTENERS ---
   useEffect(() => {
+    const statsListener = DeviceEventEmitter.addListener('statsReceived', (stats) => {
+        console.log(">> UI: Stats received", stats);
+        setLeaderboard(prev => {
+            const existing = prev.find(p => p.handle === stats.handle);
+            if (existing) {
+                return prev.map(p => p.handle === stats.handle ? stats : p);
+            }
+            return [...prev, stats];
+        });
+    });
+
+    // ==========================================
+    // UMPIRE MODE: INGESTION, LEDGER & UI NOTIFY
+    // ==========================================
+    const umpireDataListener = DeviceEventEmitter.addListener('umpireDataReceived', async (data) => {
+        const { card, sender, timestamp } = data;
+
+        if (card) {
+            try {
+                const hostEventId = await AsyncStorage.getItem('@jaww_active_event_id');
+                const currentProfile = await loadProfile();
+                const eventName = card.subject || "Mission";
+
+                if (hostEventId) card.event_id = hostEventId; 
+
+                const safeTimestamp = timestamp ? new Date(parseInt(timestamp, 10)).toISOString() : new Date().toISOString();
+
+                // NATIVE WRITE-BEFORE-SEND INGESTION
+                // We trust the fully encrypted Escrow payload minted natively by the Sender!
+                // Save Cryptographic state
+                await insertOrReplaceCard(card);
+                
+                // Save SQL Telemetry
+                await insertTransferRecord({
+                    cardId: card.id,
+                    recipientHandle: currentProfile?.handle || 'Umpire',
+                    timestamp: safeTimestamp
+                });
+
+                // UPDATE THE UMPIRE LEADERBOARD UI DYNAMICALLY
+                setLeaderboard(prev => {
+                    const existing = prev.find(p => p.handle === sender);
+                    if (existing) {
+                        return prev.map(p => p.handle === sender ? {
+                            ...p,
+                            authoredCount: (p.authoredCount || 0) + 1,
+                            expertiseScore: (p.expertiseScore || 0) + (card.hops || 1)
+                        } : p);
+                    }
+                    return [...prev, {
+                        handle: sender,
+                        authoredCount: 1,
+                        expertiseScore: card.hops || 1,
+                        totalVaultSize: 1,
+                        domainDominance: card.topic ? card.topic.replace('human/', '').toUpperCase() : 'MISSION'
+                    }];
+                });
+
+                // --- UI DEBOUNCE TO PREVENT ANDROID CRASH ---
+                console.log(">> UI: Background Umpire Sync Debouncing...");
+                InteractionManager.runAfterInteractions(async () => {
+                   try {
+                       const freshCards = await getAllCards();
+                       setCards(freshCards);
+
+                       if (Platform.OS === 'android') {
+                           ToastAndroid.show(`New card submitted for ${eventName.toUpperCase()}!`, ToastAndroid.LONG);
+                       }
+                   } catch(e) {}
+                });
+            } catch (error) {
+                console.error(">> UMPIRE INGESTION: Failed to process incoming intel.", error);
+            }
+        }
+    });
+
+    // ==========================================
+    // THE ZERO-CLICK MESH PING (Automated Genesis Hunt)
+    // ==========================================
+    const syncPingListener = DeviceEventEmitter.addListener('onSyncPingReceived', async (data) => {
+        const { cardId, senderHandle } = data;
+
+        console.log(`>> MESH: Caught background ping from ${senderHandle}. Waking up the Bouncer...`);
+
+        try {
+            // 1. Check if we actually own this card before we waste radio power
+            const localCard = await getCardById(cardId);
+            if (!localCard) {
+                console.log(`>> MESH: Card not found locally. Ignoring ping.`);
+                return;
+            }
+
+            // 2. Fire the Phase 1 Security Challenge!
+            // initiateMeshSync internally handles the nonce and sends the REQ:CHALLENGE
+            await BluetoothService.initiateMeshSync(senderHandle, localCard);
+
+        } catch (error) {
+            console.error(">> MESH: Background Handshake Failed", error);
+        }
+    });
+
+    const meshSyncReceivedListener = DeviceEventEmitter.addListener('meshSyncReceived', async (data) => {
+        const { cardId, contentHash, genesisSignature, incomingHistory } = data;
+        console.log(`>> MESH SYNC: Received sync request for ${cardId}`);
+        
+        try {
+            const localCard = await getCardById(cardId);
+            if (!localCard) {
+                console.log(">> MESH SYNC: Gatekeeper Failed: Card not found locally.");
+                return;
+            }
+            if (localCard.hash !== contentHash) {
+                console.log(">> MESH SYNC: Gatekeeper Failed: Divergent Cards (Content Hash Mismatch).");
+                return;
+            }
+            if (localCard.history[0]?.signature !== genesisSignature) {
+                console.log(">> MESH SYNC: Gatekeeper Failed: Divergent Cards (Genesis Signature Mismatch).");
+                return;
+            }
+
+            console.log(">> MESH SYNC: Gatekeeper Passed. Merging...");
+            const mergedHistory = mergeAndSortLedgers(localCard.history, incomingHistory);
+            
+            const updatedCard = {
+                ...localCard,
+                history: mergedHistory,
+                hops: calculateTrueHops(mergedHistory),
+                hop_count: calculateTrueHops(mergedHistory)
+            };
+
+            await insertOrReplaceCard(updatedCard);
+            
+            // Ping back the fully merged ledger to the initiator
+            await sendSyncPingBack(cardId, mergedHistory);
+            
+            InteractionManager.runAfterInteractions(async () => {
+                const freshCards = await getAllCards();
+                setCards(freshCards);
+                if (Platform.OS === 'android') {
+                    ToastAndroid.show("Mesh Sync Received & Merged!", ToastAndroid.SHORT);
+                }
+            });
+        } catch (error) {
+            console.error(">> MESH SYNC ERROR (Receiver):", error);
+        }
+    });
+
+    // This catches both Will's and Neo's Final Seal Events
+    const meshSyncCompleteListener = DeviceEventEmitter.addListener('meshSyncComplete', async (data) => {
+        const { cardId, mergedHistory, added: passedAdded, title: passedTitle } = data;
+        
+        try {
+            // Guarantee we have the local card for the Title and exact math
+            const localCard = await getCardById(cardId);
+            if (!localCard) return;
+
+            const title = passedTitle || localCard.title;
+            
+            // If Will's old code fired this, 'added' might be missing. Let's calculate it safely.
+            const oldLength = localCard.history ? localCard.history.length : 0;
+            const newLength = mergedHistory ? mergedHistory.length : (oldLength + (passedAdded || 0));
+            const added = passedAdded !== undefined ? passedAdded : Math.max(0, newLength - oldLength);
+
+            if (added > 0) {
+                // 1. Show the Toast message
+                if (Platform.OS === 'android') {
+                    ToastAndroid.show(`Ledger Updated for ${title}!`, ToastAndroid.LONG);
+                }
+                Vibration.vibrate([0, 100, 50, 100]); 
+
+                // 2. Set the transient badge state (+X entries)
+                setSyncBadges(prev => ({ ...prev, [cardId]: added }));
+
+                // 3. Clear the badge after 5 seconds
+                setTimeout(() => {
+                    setSyncBadges(prev => {
+                        const newState = { ...prev };
+                        delete newState[cardId];
+                        return newState;
+                    });
+                }, 5000);
+            }
+
+            // 4. THE DYNAMIC DEPTH SORT
+            // Fetch all cards and sort them by the highest number of ledger entries
+            const freshCards = await getAllCards();
+            freshCards.sort((a, b) => (b.hops || 0) - (a.hops || 0));
+            
+            setCards(freshCards);
+        } catch (error) {
+            console.error(">> MESH SYNC UI ERROR:", error);
+        }
+    });
+
     const successListener = DeviceEventEmitter.addListener('onTransferSuccess', (event) => {
         Vibration.vibrate([0, 100, 50, 100]); // Physical Feedback
         const msg = `Successfully sent "${event.cardTitle}"`;
@@ -364,83 +875,289 @@ export default function App() {
         handleTransferCompletion(data);
     });
 
+    // This catches both the Challenge responses AND the Ledger payloads
+    const meshPayloadListener = DeviceEventEmitter.addListener('onMeshPayloadReceived', async (data) => {
+        const { payload, remoteDeviceAddress } = data;
+        
+        try {
+            // ==========================================
+            // TRACK A: THE BOUNCER & GATEKEEPER
+            // ==========================================
+            if (payload.startsWith('ACK:CHALLENGE:')) {
+                const parts = payload.split(':');
+                const signature = parts[2];
+                const publicKey = parts[3];
+                
+                // Decode the metadata Neo sent
+                const remoteTitle = Buffer.from(parts[4] || '', 'base64').toString('utf8');
+                const remoteTopic = Buffer.from(parts[5] || '', 'base64').toString('utf8');
+                const remoteCreator = Buffer.from(parts[6] || '', 'base64').toString('utf8');
+                
+                const remoteHandle = parts[7] 
+                    ? Buffer.from(parts[7], 'base64').toString('utf8') 
+                    : remoteCreator || "Unknown Operator";
+
+                console.log(`>> IDENTITY: Registering ${remoteHandle} for UI resolution...`);
+
+                await registerPeerIdentity(remoteHandle, publicKey);
+                
+                console.log(">> BOUNCER: Checking ID at the door...");
+                const isValid = await verifySignature(global.lastSentNonce, signature, publicKey);
+                if (!isValid) {
+                    console.error(">> BOUNCER: Identity Spoof Detected! Killing connection.");
+                    return; 
+                }
+
+                console.log(">> BOUNCER: Identity Verified! Checking Card Metadata...");
+
+                // Pull Will's local version of the card
+                const localCard = await getCardById(global.pendingSyncCardId);
+
+                // --- THE STRICT MATCH GATEKEEPER ---
+                if (localCard.title !== remoteTitle || 
+                    localCard.classification !== remoteTopic || 
+                    localCard.creator !== remoteCreator) {
+                    
+                    console.error(">> GATEKEEPER: Divergent Card Metadata. Sync Aborted.");
+                    console.log(`Local: ${localCard.title} | Remote: ${remoteTitle}`);
+                    
+                    if (Platform.OS === 'android') {
+                        ToastAndroid.show("Sync Aborted: Metadata mismatch", ToastAndroid.SHORT);
+                    }
+                    return; // Burn the bridge.
+                }
+
+                console.log(">> GATEKEEPER: Metadata Match 1:1. Compiling Inventory...");
+                
+                // Extract Will's current signatures
+                const localLedger = localCard.history || [];
+                const mySignatures = localLedger.map(entry => entry.signature);
+                
+                // Ask Neo for the Delta
+                await BluetoothService.requestDelta(remoteDeviceAddress, global.pendingSyncCardId, mySignatures);
+                return; // End Track A. Wait for Neo's reply.
+            }
+
+            // ==========================================
+            // TRACK B: THE ZIPPER (Data Merging)
+            // ==========================================
+            if (payload.startsWith('ACK:DELTA_PAYLOAD:')) {
+                console.log(`>> MESH: Received Delta payload (${payload.length} bytes). Processing zipper...`);
+                
+                // This merges the NEW incoming ledger entries with Will's local ledger
+                const syncResult = await BluetoothService.processIncomingZipper(payload);
+
+                if (syncResult.success) {
+                    console.log(">> MESH: Zipper successful! Sending return ping to finalize...");
+                    
+                    await BluetoothService.sendReturnPing(remoteDeviceAddress, syncResult.finalLedger);
+                    
+                    const freshCards = await getAllCards();
+                    setCards(freshCards);
+                    
+                    Vibration.vibrate([0, 100, 50, 100]); 
+                    if (Platform.OS === 'android') {
+                        ToastAndroid.show("Mesh Sync Complete!", ToastAndroid.SHORT);
+                    }
+                }
+                return; // End Track B. Sync complete.
+            }
+        } catch (error) {
+            console.error(">> MESH: Payload processing failed", error);
+        }
+    });
+
     return () => {
+      statsListener.remove();
+      umpireDataListener.remove();
+      syncPingListener.remove(); // NEW CLEANUP
+      meshSyncReceivedListener.remove();
+      meshSyncCompleteListener.remove();
       successListener.remove();
       pendingListener.remove();
       transferCompleteListener.remove();
+      meshPayloadListener.remove();
     };
   }, []);
 
-  const handleTransferCompletion = async ({ cardId, recipientHandle }) => {
+  useEffect(() => {
+    const validationListener = DeviceEventEmitter.addListener('validateTransfer', async ({ header, onValidationComplete }) => {
     try {
-        // --- TASK 1: HAPTIC SIGNATURE ---
-        // This specific haptic pattern signifies the final "handshake" completion.
-        // It's a sharp, cyberpunk-style pulse. On iOS, we use a simple vibration
-        // as patterns are not as well supported without extra libraries.
-        if (Platform.OS === 'android') {
-            Vibration.vibrate([0, 10, 50, 150]);
+        const localCard = await getCardById(header.id);
+        let isRedundant = false;
+
+        if (localCard) {
+            // Recalculate the local state key
+            const localLedgerHash = generateLedgerHash(localCard.history);
+            
+            // THE ULTIMATE REDUNDANCY CHECK:
+            // If the content is the same AND the history triad math is the same, it's a duplicate.
+            if (localCard.hash === header.contentHash && localLedgerHash === header.ledgerHash) {
+                console.log(">> VALIDATION: State Keys match perfectly. Marking Redundant.");
+                isRedundant = true;
+            } else {
+                console.log(">> VALIDATION: Card is new or updated. Sending ACK.");
+            }
         } else {
-            Vibration.vibrate(); 
+            console.log(`>> DB: No card found for ID [${header.id}]. Accepting new card.`);
         }
 
-        // 1. Log the raw transfer event to the dedicated table
+        onValidationComplete(isRedundant);
+    } catch (e) {
+        console.error(">> VALIDATION ERROR:", e);
+        onValidationComplete(false); // Default to accepting if check fails
+    }
+});
+
+    const abortListener = DeviceEventEmitter.addListener('transferAborted', ({ reason }) => {
+        Alert.alert("Transfer Cancelled", reason);
+    });
+
+    return () => {
+        validationListener.remove();
+        abortListener.remove();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (isUmpireMode && gamePhase === 'STRETCH') {
+      BluetoothService.startAdvertising(null, true, eventStartTime);
+    } else if (!isUmpireMode) {
+      // Revert to normal broadcasting if umpire mode is turned off
+      if(sourceState === 'BROADCASTING') {
+        BluetoothService.startAdvertising();
+      }
+    }
+  }, [isUmpireMode, gamePhase, eventStartTime]);
+  
+    const handleTransferCompletion = async ({ cardId, recipientHandle, recipientPublicKey, timestamp, eventName, isUmpire }) => {
+    try {
+        const isoTimestamp = new Date(parseInt(timestamp, 10)).toISOString();
+
+        // 1. DYNAMIC IDENTITY LOADING
+        const { publicKey: trueSenderKey } = await getOrGenerateKeys();
+        const currentProfile = await loadProfile();
+        const trueSenderHandle = currentProfile?.handle || 'Unknown Sender';
+
+        // 2. RESOLVE THE UMPIRE'S TRUE PUBLIC KEY
+        let finalRecipientKey = recipientPublicKey;
+        if (isUmpire && recipientPublicKey === 'UMPIRE_MODE') {
+            try {
+                // Look up Neo's actual cryptographic key from when you scanned into the event
+                const dbKeys = await runQuery(`SELECT publicKey FROM trusted_sources WHERE handle = ?`, [recipientHandle]);
+                if (dbKeys && dbKeys.length > 0) {
+                    finalRecipientKey = dbKeys[0].publicKey;
+                } else {
+                    console.warn(`>> SECURITY: Host ${recipientHandle} not found in trusted sources.`);
+                    finalRecipientKey = `UNVERIFIED_HOST_${recipientHandle}`;
+                }
+            } catch (e) {
+                console.error(">> SECURITY: Failed to resolve Umpire key.", e);
+            }
+        }
+
+        if (!trueSenderKey || !finalRecipientKey) return; 
+
+        // 3. SQL TELEMETRY (Raw Transfer Record)
         await insertTransferRecord({
-            cardId,
-            recipientHandle,
-            timestamp: new Date().toISOString(),
+            cardId, 
+            recipientHandle, 
+            recipientPublicKey: finalRecipientKey,
+            timestamp: isoTimestamp, 
+            senderHandle: trueSenderHandle, 
+            senderPublicKey: trueSenderKey
         });
 
-        // 2. FETCH FROM DB: Get the card directly from SQLite to avoid stale state
+        // 4. THE CRYPTOGRAPHIC LEDGER ENGINE
         const card = await getCardById(cardId);
+        if (card) {
+            const safeHistory = Array.isArray(card.history) ? card.history : [];
+            
+            // SPAM FILTER (Now takes Action into account for rigorous Deduplication of Syncs)
+            let entryAction = 'SHARED';
+            if (isUmpire) {
+                entryAction = 'SUBMITTED';
+            } else if (card.topic && card.topic.includes('question')) {
+                entryAction = 'ASKED_MESH';
+            } else if (card.topic && card.topic.includes('answer')) {
+                entryAction = 'RESPONDED_MESH';
+            }
 
-        if (!card) {
-            console.warn(`>> UI: Received ACK for a card not in DB: ${cardId}`);
-            return;
+            // PRE-FLIGHT RECEIPT CHECK (Sender Side)
+            // Check if we have EVER sent this card to this specific user in the past.
+            const alreadyExists = safeHistory.some(
+                entry => entry.to === finalRecipientKey && entry.from === trueSenderKey && entry.action === entryAction
+            );
+
+            if (!alreadyExists) {
+                const lastSignedEntry = [...safeHistory].reverse().find(e => e.signature);
+                const previousSignature = lastSignedEntry ? lastSignedEntry.signature : card.genesis.signature;
+                const messageToSign = previousSignature + finalRecipientKey;
+                const newSignature = await signData(messageToSign);
+
+                // 👇 THE PERFECT LEDGER ENTRY 👇
+                const universalEntry = buildLedgerEntry({
+                    action: entryAction,
+                    fromKey: trueSenderKey, 
+                    toKey: finalRecipientKey,
+                    senderHandle: trueSenderHandle,
+                    recipientHandle: recipientHandle,
+                    signature: newSignature,
+                    timestamp: isoTimestamp
+                });
+                
+                // If Umpire Mode, tag the event name (e.g., "Workouts")
+                if (isUmpire && eventName) {
+                    universalEntry.event = eventName;
+                    universalEntry.umpire = recipientHandle;
+                }
+                
+                const newHistory = [...safeHistory, universalEntry];
+                const calculatedHops = calculateTrueHops(newHistory);
+                
+                await insertOrReplaceCard({ 
+                    ...card, 
+                    history: newHistory,
+                    hops: calculatedHops,
+                    hop_count: calculatedHops 
+                });
+                
+                console.log(`>> DB: Ledger sealed for ${recipientHandle}. Total Hops: ${calculatedHops}`);
+                broadcastGossipSync({ ...card, history: newHistory }, recipientHandle);
+            }
         }
 
-        // 3. IDEMPOTENCY CHECK: See if this transfer is already logged in the card's history
-        const safeHistory = Array.isArray(card.history) ? card.history : [];
-        const alreadyExists = safeHistory.some(
-            entry => entry.action === 'TRANSFER' && entry.user === recipientHandle
-        );
-
-        if (alreadyExists) {
-            ToastAndroid.show(`Transfer to ${recipientHandle} already logged.`, ToastAndroid.SHORT);
-            return;
+        // 5. THE CRASH BARRICADE & FOREGROUND UI UPDATE
+        if (isUmpire) {
+            console.log(">> UI: Background Sync complete. Debouncing UI re-render to prevent Bluetooth crash...");
+            // Debounce the heavy UI state update so it doesn't collide with the aggressive GATT loop
+            InteractionManager.runAfterInteractions(async () => {
+                try {
+                    const freshCards = await getAllCards();
+                    setCards(freshCards);
+                    
+                    if (cardId === selectedCard?.id) {
+                        const updatedCard = freshCards.find(c => c.id === cardId);
+                        if (updatedCard) setSelectedCard(updatedCard);
+                    }
+                } catch(e) { /* ignore */ }
+            });
+            return; 
         }
 
-        // 4. Create the new history entry
-        const transferEntry = {
-            action: 'TRANSFER',
-            user: recipientHandle,
-            from: profile.handle,
-            timestamp: new Date().toISOString()
-        };
-
-        // 5. Update the card object: history and hops
-        const updatedCard = { 
-            ...card, 
-            history: [...safeHistory, transferEntry],
-            // Hops are incremented on the RECEIVER side to be authoritative.
-            // We only log the history event here.
-            hops: (card.hops || 0)
-        };
-
-        // 6. Persist to DB
-        await insertOrReplaceCard(updatedCard);
-        
-        // 7. REFRESH UI FROM SOURCE OF TRUTH
-        const freshCards = await getAllCards();
-        setCards(freshCards);
-        
-        const successMsg = "INTEL SYNCED: Influence recorded in the Mesh.";
-        if (Platform.OS === 'android') {
-            ToastAndroid.show(successMsg, ToastAndroid.LONG);
-        } else {
-            Alert.alert("Sync Complete", successMsg);
-        }
+        InteractionManager.runAfterInteractions(async () => {
+            try {
+                const freshCards = await getAllCards();
+                setCards(freshCards);
+                
+                if (Platform.OS === 'android') {
+                    Vibration.vibrate([0, 10, 50, 150]);
+                    ToastAndroid.show("INTEL SYNCED: Influence recorded in the Mesh.", ToastAndroid.LONG);
+                }
+            } catch(e) {}
+        });
     } catch (error) {
-        console.error(">> FATAL ACK ERROR:", error);
+        console.error(">> FATAL TRANSFER ERROR:", error);
     }
 };
 
@@ -458,36 +1175,50 @@ export default function App() {
     const boot = async () => {
       try {
         console.log(">> BOOT: Starting Systems...");
-        // Removed the old migrateAsyncStorageToSQLite() - we don't need it anymore!
-
+        
         await initDB();
         
         const permStatus = await requestPermissions();
         setHasPermissions(permStatus);
         
-        if (typeof requestRadarPermissions === 'function') await requestRadarPermissions();
-        if (!permStatus) { setIsLoading(false); return; }
-
-        startServer(); // ENGINE 4 IGNITION
-
-        const keys = await getOrGenerateKeys();
-        if (keys) setProfile(prev => ({ ...prev, publicKey: keys.publicKey }));
-        
-        const savedProfile = await loadProfile();
-        if (savedProfile && savedProfile.handle) {
-            setProfile(savedProfile);
-            BluetoothService.setHandle(savedProfile.handle);
-        } else {
-            console.log(">> NO PROFILE FOUND.");
+        if (!permStatus) { 
+            setIsLoading(false); 
+            return; 
         }
 
-        // --- THE CLEAN SQLITE BOOT SEQUENCE ---
+        startServer();
+
+        // 1. Get cryptographic keys first as the root of identity.
+        const keys = await getOrGenerateKeys();
+        
+        // 2. Load the user's saved profile data (handle, etc.).
+        const savedProfile = await loadProfile();
+
+        // 3. Atomically combine the absolute truth (current keys) with saved data.
+        const completeProfile = {
+            ...savedProfile,           
+            publicKey: keys?.publicKey 
+        };
+
+        // 4. Set the final, hydrated profile state in a single, atomic update.
+        setProfile(completeProfile);
+
+        // 5. Inform services that need the handle.
+        if (completeProfile.handle) {
+            BluetoothService.setHandle(completeProfile.handle);
+            
+            // 👇 TURN THE KEY HERE 👇
+            BluetoothService.startAutomatedGenesisHunt(completeProfile.handle);
+        } else {
+            console.log(">> NO PROFILE FOUND. Onboarding required.");
+        }
+
+        // --- Load cards and other resources ---
         const existingCards = await getAllCards();
         if (existingCards.length === 0) { 
-          console.log(">> BOOT: Empty database. Injecting Civilization Stack directly to SQLite...");
+          console.log(">> BOOT: Empty database. Injecting Civilization Stack...");
           const fullStack = [...INITIAL_SEEDS, ...MASTER_LIBRARY, ...funLibrary];
           
-          // Auto-generate a SYSTEM genesis block for old default cards
           const secureStack = fullStack.map(card => ({
               ...card,
               history: card.history || [],
@@ -504,19 +1235,53 @@ export default function App() {
           console.log(`>> BOOT: Loaded ${existingCards.length} cards from SQLite.`);
           setCards(existingCards); 
         }
-        // --------------------------------------
         
         const sources = await fetchFromDB(); 
         setTrustedSources(sources);
         setIsLoading(false);
         setIsDbReady(true);
+
       } catch (error) {
         console.error("Boot failed:", error);
         setIsLoading(false); 
       }
     };
+
     boot();
-  }, []); 
+
+    // 👇 KILL THE ENGINE ON APP CLOSE 👇
+    return () => {
+        BluetoothService.stopAutomatedGenesisHunt();
+    };
+  }, []);
+
+  // --- AUTOMATED HUNT YIELD MONITOR ---
+  useEffect(() => {
+      const isManualOperationActive = 
+          isScannerVisible || 
+          isOracleVisible || 
+          isCreateVisible || 
+          isUmpireEventModalVisible || 
+          isHostQRVisible || 
+          isSyncScreenVisible ||
+          isBrowseVisible ||
+          isLoading || // 👈 This keeps the brakes on while the "Connecting..." spinner is up
+          !!activePeer || 
+          !!pendingRequest;
+
+      if (isManualOperationActive) {
+          BluetoothService.pauseAutomatedHunt();
+      } else {
+          // Add a small delay so the radio can "settle" before resuming the hunt
+          setTimeout(() => {
+             BluetoothService.resumeAutomatedHunt();
+          }, 2000);
+      }
+  }, [
+      isScannerVisible, isOracleVisible, isCreateVisible, 
+      isUmpireEventModalVisible, isHostQRVisible, isSyncScreenVisible, 
+      isBrowseVisible, isLoading, activePeer, pendingRequest
+  ]);
 
   useEffect(() => {
     if (isDbReady) {
@@ -540,15 +1305,79 @@ export default function App() {
     return () => { clearInterval(cleaner); BluetoothService.stopScanning(); };
   }, []);
 
+  useEffect(() => {
+    let statsInterval;
+
+    const setupParticipantSync = async () => {
+        const activeEventId = await AsyncStorage.getItem('@jaww_active_event_id');
+        if (!activeEventId) return;
+
+        const event = await runQuery('SELECT * FROM events WHERE id = ?', [activeEventId]);
+        const isUmpire = event.length > 0 && event[0].is_umpire === 1;
+
+        if (!isUmpire) {
+            // We are a participant
+            /* statsInterval = setInterval(async () => {
+                const eventStartTime = await AsyncStorage.getItem('@jaww_event_start');
+                const parts = activeEventId.split(':');
+                const hostHandle = parts[1];
+
+                // Find umpire in nearby devices
+                const umpireDevice = nearbyDevices.find(d => d.name === hostHandle);
+
+                if (umpireDevice) {
+                    console.log(`>> PARTICIPANT: Sending stats to umpire ${hostHandle}`);
+                    const stats = await getOperatorStats(profile.handle, eventStartTime);
+                    BluetoothService.transferStats(umpireDevice.id, { ...stats, handle: profile.handle });
+                } else {
+                    console.log(">> PARTICIPANT: Umpire not found in nearby devices.");
+                }
+            }, 300000); // 5 minutes
+            */
+        }
+    };
+
+    if (isDbReady) {
+        setupParticipantSync();
+    }
+
+    return () => {
+        if (statsInterval) {
+            clearInterval(statsInterval);
+        }
+    };
+  }, [isDbReady, profile.handle, nearbyDevices]);
+
   // --- LISTEN WHILE BROADCASTING ---
   useEffect(() => {
-      if (targetPeripheralId) return;
-      if (viewMode === 'radar' || viewMode === 'broadcast') {
-          BluetoothService.startScanning(handleDeviceFound);
-      } else {
-          BluetoothService.stopScanning();
+    if (targetPeripheralId) {
+      BluetoothService.startScanning(handleDeviceFound);
+      return () => BluetoothService.stopScanning();
+    }
+
+    if (viewMode === 'radar' || viewMode === 'broadcast' || activeUmpireEvent) {
+      if (updateIntervalRef.current) clearInterval(updateIntervalRef.current);
+      BluetoothService.startScanning(handleDeviceFound);
+      updateIntervalRef.current = setInterval(processDeviceBuffer, 1000);
+
+      return () => {
+        BluetoothService.stopScanning();
+        if (updateIntervalRef.current) {
+          clearInterval(updateIntervalRef.current);
+          updateIntervalRef.current = null;
+        }
+        processDeviceBuffer();
+      };
+    } else {
+      BluetoothService.stopScanning();
+      if (updateIntervalRef.current) {
+        clearInterval(updateIntervalRef.current);
+        updateIntervalRef.current = null;
       }
-  }, [viewMode, targetPeripheralId]);
+      return undefined;
+    }
+  }, [viewMode, targetPeripheralId, handleDeviceFound, processDeviceBuffer, activeUmpireEvent]);
+
 
   // --- ENGINE 3: BROWSE / REQUEST ---
   const handleBrowse = async () => {
@@ -574,61 +1403,174 @@ export default function App() {
       }, 1000);
   };
 
-  const handleDeviceFound = (device) => {
-    if (!device || !device.id) return;
+  const processDeviceBuffer = useCallback(() => {
+    if (deviceBufferRef.current.size === 0) return;
 
-    // --- SILENT HUNTER LOGIC (UPDATED) ---
-    const UI_TO_BITMASK = {
-        'food': 1, 'education': 2, 'fitness': 3, 'professional': 4, 'fun': 5
-    };
-
-    const currentFilter = radarFilterRef.current; // READ FROM REF
-
-    if (targetPeripheralId && device.id === targetPeripheralId) {
-          console.log(`>> TARGET ACQUIRED: ${targetPeripheralId}`);
-          setTargetPeripheralId(null); 
-          BluetoothService.stopScanning(); 
-          Alert.alert("Target Found", "Engine 3 Link not yet active.");
-          return;
-    }
+    const newDevices = new Map(deviceBufferRef.current);
+    deviceBufferRef.current.clear();
 
     setNearbyDevices(currentDevices => {
-      const index = currentDevices.findIndex(d => d.id === device.id);
-      const catMap = { 1: 'general', 2: 'fitness', 3: 'food', 4: 'education', 5: 'fun', 6: 'professional' };
-      const topicSlug = catMap[device.category] || 'general';
+      const updatedDevices = new Map(currentDevices.map(d => [d.id, d]));
 
-      const deviceEntry = {
-        id: device.id,
-        name: device.name || "Unknown Signal",
-        offer: { topic: `human/${topicSlug}`, title: device.title || 'Signal Detected' }, 
-        rssi: device.rssi,
-        lastSeen: Date.now(),
-        position: (index > -1) ? currentDevices[index].position : { x: 20 + Math.random() * 60, y: 20 + Math.random() * 60 },
-        stableId: device.id,
-        packetCount: device.packetCount,
-        categoryBitmask: device.categoryBitmask
-      };
+      newDevices.forEach(device => {
+        const existing = updatedDevices.get(device.id);
+        const catMap = { 1: 'food', 2: 'education', 3: 'fitness', 4: 'professional', 5: 'fun', 0: 'general' };
+        const topicSlug = catMap[device.category] || 'general';
 
-      if (index > -1) {
-        const updated = [...currentDevices];
-        updated[index] = deviceEntry;
-        return updated;
-      } else {
-        return [...currentDevices, deviceEntry];
-      }
+        updatedDevices.set(device.id, {
+          ...device,
+          lastSeen: Date.now(),
+          position: existing ? existing.position : { x: 20 + Math.random() * 60, y: 20 + Math.random() * 60 },
+          offer: { topic: `human/${topicSlug}`, title: device.subject ? `[ ${device.subject.toUpperCase()} ]` : 'Signal Detected' },
+        });
+      });
+
+      return Array.from(updatedDevices.values());
     });
-  };
+  }, []);
 
-  const toggleBroadcast = async () => {
+  const handleDeviceFound = useCallback(async (device) => {
+    if (!device || !device.id) return;
+
+    // 1. LOG UMPIRE MAC FOR MANUAL OVERRIDE
+    if (device.isUmpire) setLastSeenUmpireId(device.id);
+    
+    // 2. IDENTITY CHECK (Using Synchronous Lock)
+    if (device.isUmpire && !umpireSyncLockRef.current.has(device.id)) {
+        
+        const fullHostHandle = activeUmpireEvent?.id?.split(':')[1];
+        
+        // 3. THE GATEKEEPER
+        const isHandleMatch = activeUmpireEvent && device.subject && device.name && fullHostHandle &&
+            fullHostHandle.startsWith(device.name);
+        const isSubjectMatch = activeUmpireEvent && device.subject && activeUmpireEvent.subject.startsWith(device.subject);
+
+        // --- DIAGNOSTIC LOGS ---
+        console.log(`[JITTER SYNC DIAGNOSTICS] Radar evaluating incoming beacon...`);
+        console.log(`  - Umpire Beacon: ${device.isUmpire}`);
+        console.log(`  - Sync Lock Free: ${!umpireSyncLockRef.current.has(device.id)}`);
+        console.log(`  - Mission Active: ${!!activeUmpireEvent}`);
+        console.log(`  - Beacon Has Subject: ${!!device.subject}`);
+        console.log(`  - Beacon Has Handle: ${!!device.name}`);
+        console.log(`  - Host Handle Valid: ${!!fullHostHandle}`);
+        console.log(`  - Handle Match: ${isHandleMatch} (Host: ${fullHostHandle}, Beacon: ${device.name})`);
+        console.log(`  - Subject Match: ${isSubjectMatch} (Mission: ${activeUmpireEvent?.subject}, Beacon: ${device.subject})`);
+
+        if (isHandleMatch && isSubjectMatch) {
+          
+          // ---> THE TITANIUM LOCK: Instantly block the next radar ping <---
+          umpireSyncLockRef.current.add(device.id);
+          
+          console.log(`[JITTER SYNC] Gatekeeper Approved. Checking Queue...`);
+
+          getPendingUmpireSyncs(activeUmpireEvent.subject).then(pendingCardIds => {
+            if (pendingCardIds && pendingCardIds.length > 0) {
+              
+              const jitterDelay = Math.floor(Math.random() * (8000 - 2000 + 1) + 2000);
+              console.log(`[JITTER SYNC] Target locked. Deploying 1 transfer thread in ${jitterDelay}ms...`);
+
+              setTimeout(async () => {
+                try {
+                  const upgradedCards = [];
+                  const isoTimestamp = new Date().toISOString();
+                  const keys = await getOrGenerateKeys(); 
+                  
+                  for (const id of pendingCardIds) {
+                      const cardData = await getCardById(id);
+                      if (!cardData) continue;
+                      
+                      // UMPIRE ESCROW WRITE-BEFORE-SEND
+                      const safeHistory = Array.isArray(cardData.history) ? cardData.history : [];
+                      let lastSignedEntry = [...safeHistory].reverse().find(e => e.signature);
+                      let previousSignature = lastSignedEntry ? lastSignedEntry.signature : cardData.genesis?.signature;
+
+                      const targetPublicKey = activeUmpireEvent?.umpirePublicKey || `UNVERIFIED_HOST_${activeUmpireEvent?.umpireHandle || 'Unknown'}`;
+                      const messageToSign = previousSignature + targetPublicKey;
+                      const newSignature = await signData(messageToSign);
+
+                      const universalEntry = buildLedgerEntry({
+                          action: 'SUBMITTED',
+                          fromKey: keys.publicKey,
+                          toKey: targetPublicKey,
+                          senderHandle: profile.handle || "Unknown",
+                          recipientHandle: activeUmpireEvent?.umpireHandle || "Umpire",
+                          signature: newSignature,
+                          timestamp: isoTimestamp,
+                          event: activeUmpireEvent?.subject || "Mission"
+                      });
+
+                      const finalHistory = [...safeHistory, universalEntry];
+                      const calculatedHops = calculateTrueHops(finalHistory);
+
+                      const finalizedCard = {
+                          ...cardData,
+                          history: finalHistory,
+                          hops: calculatedHops,
+                          hop_count: calculatedHops
+                      };
+
+                      await insertOrReplaceCard(finalizedCard);
+                      upgradedCards.push(finalizedCard);
+                  }
+
+                  if (upgradedCards.length > 0) {
+                      const result = await BluetoothService.sendUmpirePayload(
+                          device.id, 
+                          upgradedCards, 
+                          profile.handle,
+                          activeUmpireEvent?.umpireHandle || 'Umpire',
+                          activeUmpireEvent?.subject
+                      );
+                      
+                      if (result && result.success) {
+                          await markUmpireQueueAsSynced(pendingCardIds); 
+                          console.log(`[JITTER SYNC] Transmission complete. Queue crossed off.`);
+                          setShowSyncFlare(true);
+                          setTimeout(() => setShowSyncFlare(false), 3000); 
+                      }
+                  }
+                } catch (error) {
+                  console.error("[JITTER SYNC] Transfer Failed:", error);
+                } finally {
+                  // ---> UNLOCK: Safe to scan again <---
+                  umpireSyncLockRef.current.delete(device.id);
+                }
+              }, jitterDelay);
+            } else {
+              console.log("[JITTER SYNC] Queue is empty. Releasing lock.");
+              // No cards to send, release the lock
+              umpireSyncLockRef.current.delete(device.id);
+            }
+          }).catch(err => {
+            console.error("[JITTER SYNC] Queue check failed:", err);
+            umpireSyncLockRef.current.delete(device.id);
+          });
+        }
+      }
+
+    if (targetPeripheralId && device.id === targetPeripheralId) {
+          setTargetPeripheralId(null); 
+          BluetoothService.stopScanning(); 
+          return;
+    }
+    
+    deviceBufferRef.current.set(device.id, device);
+  }, [profile.handle, activeUmpireEvent, targetPeripheralId]);
+
+    const toggleBroadcast = async () => {
       if (sourceState === 'BROADCASTING') { 
           await BluetoothService.stopBroadcasting(); 
           setSourceState('IDLE');
+          setIsSyncScreenVisible(false); // <--- Safety catch to hide modal
           if (viewMode === 'broadcast') setViewMode('wheel'); 
       } else {
           try {
             await BluetoothService.startAdvertising(); // Uses default categories
             setSourceState('BROADCASTING');
             Vibration.vibrate(100);
+            
+            setIsSyncScreenVisible(true); // <--- BOOM! Trigger the Lore Screen
+            
             if (viewMode === 'wheel') setViewMode('broadcast');
           } catch (e) { 
             Alert.alert("Broadcast Error", "Radio failed to initialize."); 
@@ -642,111 +1584,226 @@ export default function App() {
     await saveLibrary(updatedList);
   };
 
+  // --- NEW: EVENT CARD HANDLER ---
+  const handleOpenEventCard = () => {
+    if (activeUmpireEvent && activeUmpireEvent.subject) {
+      // Pre-fill the modal with the Umpire's exact subject string
+      setCreateInitialData({ subject: activeUmpireEvent.subject });
+      setIsCreateVisible(true);
+    }
+  };
+
   const handleCreateCard = async (c) => {
     try {
-      // 1. Create the card object with its genesis block
+      // 1. Prepare the topic path
       const topicPath = `human/${c.topic || 'general'}`;
-      const newCard = await createCard(profile.handle, c.title, c.body, topicPath);
-      
-      newCard.subject = c.subject || null;
 
-      // 3. Sign the genesis block to prove authorship
-      const signature = await signData(JSON.stringify(newCard.genesis));
-      if (!signature) {
-        throw new Error("Failed to sign the card.");
+      // 2. Generate and SIGN the card (Wait for this to complete!)
+      const signedCard = await createCard(
+          profile.publicKey, 
+          c.title, 
+          c.body, 
+          topicPath, 
+          c.subject, 
+          profile.handle
+      );
+
+      // 3. Apply the Event Stamp if we are in a mission
+      const activeEventId = await AsyncStorage.getItem('@jaww_active_event_id');
+      if (activeEventId) { 
+          signedCard.event_id = activeEventId; 
       }
-      newCard.genesis.signature = signature;
-      
-      // 5. DEBUG: Log the card object before inserting
-      console.log(">> DBG: Card object before insert:", JSON.stringify(newCard, null, 2));
 
-      // 6. Insert the new, signed card into the SQLite database
-      await insertOrReplaceCard(newCard);
+      // 4. Save the fully formed card to SQLite
+      await insertOrReplaceCard(signedCard);
 
-      // 7. Update the UI by re-fetching from the source of truth
+      // 5. THE FIX: Only queue for Umpire once we are 100% sure we have signedCard.id
+      if (activeUmpireEvent && activeUmpireEvent.subject && signedCard.id) {
+          await queueCardForUmpire(signedCard.id, activeUmpireEvent.subject);
+          console.log(`>> QUEUED: ${signedCard.title} for Umpire Sync.`);
+      }
+
+      // 6. Refresh UI
       const freshCards = await getAllCards();
       setCards(freshCards);
-      
-      // 8. Close the modal
+      setVaultCards(freshCards);
       setIsCreateVisible(false);
+      setRefreshTrigger(t => t + 1);
+
     } catch (error) { 
-      alert(`Failed to save card: ${error.message}`); 
+      console.error(">> CREATE ERROR:", error);
+      Alert.alert("Error", `Failed to save intel: ${error.message}`); 
     }
   };
 
   // --- OFFER HANDLER (Triggered from Card Detail) ---
-  const handleOfferCard = async () => {
-      // Ensure the radio is broadcasting so the scanner (Hunter) can find us.
-      await BluetoothService.startAdvertising();
+  const handleOfferCard = async (card) => {
+      console.log("\n=======================================");
+      console.log(">> DEBUG 1 (UI): handleOfferCard Triggered");
+      console.log(">> DEBUG 1 (UI): Card Title:", card.title);
+      console.log(">> DEBUG 1 (UI): Card Subject:", card.subject);
+      console.log(">> DEBUG 1 (UI): Card Topic:", card.topic);
+      
+      setAdvertisedCard(card); 
+      
+      const subjectToBroadcast = card.subject || card.topic || 'Intel';
+      console.log(">> DEBUG 1 (UI): Fallback Subject determined as:", subjectToBroadcast);
+      console.log("=======================================\n");
+
+      await BluetoothService.startAdvertising(subjectToBroadcast);
   };
 
-  const processAndSaveIncomingCard = async (incoming, peerName) => {
-    if (!incoming || !incoming.id) {
-        Alert.alert("Transfer Error", "Received incomplete card data.");
+  const processAndSaveIncomingCard = async (incomingCard, senderHandle, timestamp) => {
+    // --- THE LEAN CHAIN VERIFICATION ---
+    if (!verifyChain(incomingCard)) {
+        console.error(">> SECURITY ALERT: Incoming card failed chain verification. Aborting.");
+        Alert.alert("Transfer Failed", "The received intel appears to be corrupted or tampered with. The transfer has been rejected.");
         return;
     }
-    
-    // 1. Check against the Single Source of Truth (SQLite)
-    const local = await getCardById(incoming.id);
-    
-    if (local) {
-        const isHeavier = (incoming.hops || 0) > (local.hops || 0);
-        const isNewContent = incoming.body !== local.body;
 
-        if (!isHeavier && !isNewContent) {
-            Alert.alert("Redundant Intel", "You already have this version of the card.", [{ text: "OK" }]);
-            return; 
+    // 1. THE SHIELD: Validate incoming payload integrity
+    if (!incomingCard || !incomingCard.id || !Array.isArray(incomingCard.history) || incomingCard.history.length === 0) {
+        Alert.alert("Transfer Corrupted", "Received card with invalid or missing history. Aborting.");
+        return;
+    }
+
+    // Gatekeeper: Ensure all parties have public keys before proceeding.
+    if (!profile.publicKey || !incomingCard.senderPublicKey) {
+        console.error(">> SECURITY ALERT: Missing public key in incoming card. Aborting save.");
+        Alert.alert("Transfer Failed", "Missing security credentials from sender or receiver.");
+        return;
+    }
+
+    try {
+        const localCard = await getCardById(incomingCard.id);
+        let cardToSave = null;
+        let alertMessage = "";
+
+        if (localCard) {
+            // --- HASH MISMATCH: VARIANT DETECTION ---
+            // If hashes don't match, it's a Fork or Review. Treat as a new 'Variant' node.
+            if (incomingCard.hash !== localCard.hash) {
+                // 1. The Lineage Stamp: Record the parent before creating a new ID.
+                incomingCard.parent_id = localCard.id;
+                incomingCard.parent_hash = localCard.hash;
+
+                // 2. The Variant Split (New ID): Create a new ID to prevent overwriting the original.
+                incomingCard.id = `${localCard.id}_variant_${incomingCard.hash.substring(0, 6)}`;
+                incomingCard.title = `↳ [VARIANT] ${localCard.title}`;
+                
+                let entryAction = 'SHARED';
+                if (incomingCard.topic && incomingCard.topic.includes('question')) {
+                    entryAction = 'ASKED_MESH';
+                } else if (incomingCard.topic && incomingCard.topic.includes('answer')) {
+                    entryAction = 'RESPONDED_MESH';
+                }
+
+                // 3. Route to New Entry Logic: Process this variant as a brand-new card.
+                // 🚨 As per protocol, we DO NOT generate local history. We accept the cryptographically signed history exactly as it is.
+                const finalHistory = incomingCard.history || [];
+
+                cardToSave = { 
+                    ...incomingCard, 
+                    history: finalHistory, 
+                    hops: calculateTrueHops(finalHistory) 
+                };                alertMessage = 'Intel Variant Acquired: ' + incomingCard.title;
+
+            } else {
+                // --- TRUE ARRAY MERGE (For Concurrent Divergence) ---
+                
+                // 1. The True Merge (Deduplication)
+                const historyMap = new Map();
+                const combinedHistory = [...localCard.history, ...incomingCard.history];
+
+                combinedHistory.forEach(entry => {
+                    // Fallbacks ensure legacy entries don't crash the map
+                    const safeAction = entry.action || 'legacy_action';
+                    const safeFromKey = entry.fromKey || 'legacy_from';
+                    const safeUserKey = entry.userKey || 'legacy_user';
+                    const safeTimestamp = entry.timestamp || 0;
+                    
+                    // The strict Action-Key-Time Triad
+                    const uniqueKey = `${safeAction}-${safeFromKey}-${safeUserKey}-${safeTimestamp}`;
+                    
+                    if (!historyMap.has(uniqueKey)) {
+                        historyMap.set(uniqueKey, entry);
+                    }
+                });
+
+                // 2. Chronological Sort
+                const mergedHistory = Array.from(historyMap.values()).sort(
+                    (a, b) => new Date(a.timestamp) - new Date(b.timestamp)
+                );
+
+                // 3. The Redundancy Check
+                if (mergedHistory.length <= localCard.history.length) {
+                    Alert.alert("Redundant Intel", "Your ledger is already up-to-date.");
+                    return;
+                }
+
+                // 4. Hop Recalculation (Correct & Idempotent)
+                // The number of hops is the number of unique transfers.
+                cardToSave = {
+                    ...localCard,
+                    history: mergedHistory,
+                    hops: calculateTrueHops(mergedHistory)
+                };
+                alertMessage = "Ledger Synced: Concurrent history merged.";
+            }
+        } else {
+            // --- NEW ENTRY LOGIC (Strict Cryptographic Passthrough) ---
+            // 🚨 We NO LONGER append unsigned "shadow" blocks.
+            // We accept the Sender's cryptographically signed history exactly as it is.
+            
+            const finalHistory = incomingCard.history || [];
+            const calculatedHops = calculateTrueHops(finalHistory);
+            
+            cardToSave = { 
+                ...incomingCard, 
+                history: finalHistory, 
+                hops: calculatedHops,
+                hop_count: calculatedHops // Feed both columns to bypass the schema ghost
+            };
+            alertMessage = `Intel Acquired: "${cardToSave.title}"`;
         }
 
-        console.log(">> DB: Merging updated card.");
-        const stamp = {
-            action: 'RECEIVED',
-            user: peerName, 
-            timestamp: new Date().toISOString(),
-            note: `Updated version (Hops: ${incoming.hops})`
-        };
-        
-        const updatedHistory = local.history ? [...local.history] : [];
-        if (incoming.history) {
-            incoming.history.forEach(h => {
-                if (!updatedHistory.some(existing => existing.timestamp === h.timestamp && existing.user === h.user)) {
-                    updatedHistory.push(h);
-                }
+        if (cardToSave) {
+            // Stamp event ID if active
+            const activeEventId = await AsyncStorage.getItem('@jaww_active_event_id');
+            if (activeEventId) {
+                cardToSave.event_id = activeEventId;
+            }
+
+            // Save to DB and refresh UI
+            await insertOrReplaceCard(cardToSave);
+            
+            broadcastGossipSync(cardToSave, profile?.handle);
+            
+            // --- UI DEBOUNCE TO PREVENT ANDROID CRASH ---
+            console.log(">> UI: Background P2P Sync Debouncing...");
+            InteractionManager.runAfterInteractions(async () => {
+                try {
+                    const freshCards = await getAllCards();
+                    setCards(freshCards);
+                    if (cardToSave.topic !== 'human/question') {
+                        // Suppress Android toast if it's a question, because we pop a modal
+                        if (Platform.OS === 'android') {
+                            ToastAndroid.show(alertMessage, ToastAndroid.LONG);
+                        } else {
+                            Alert.alert("Transfer Complete", alertMessage);
+                        }
+                    } else {
+                        setCardToFork(cardToSave);
+                    }
+                } catch(e) {}
             });
         }
-        updatedHistory.push(stamp);
 
-        const mergedCard = { ...incoming, history: updatedHistory, hops: incoming.hops };
-        await insertOrReplaceCard(mergedCard);
-        Alert.alert("Intel Updated", `Card rank increased to ${incoming.hops}.`);
-
-    } else {
-        console.log(">> DB: Adding new card...");
-        const stamp = {
-            action: 'RECEIVED',
-            user: peerName, 
-            timestamp: new Date().toISOString(),
-            note: `Discovered from ${peerName}`
-        };
-        
-        const newHistory = incoming.history ? [...incoming.history, stamp] : [stamp];
-        
-        const newCard = {
-          ...incoming,
-          hops: (incoming.hops || 0) + 1,
-          history: newHistory
-        };
-
-        await insertOrReplaceCard(newCard);
-        Alert.alert("Intel Acquired", `Successfully learned: "${incoming.title}"`);
+    } catch (error) {
+        console.error(">> FATAL: processAndSaveIncomingCard Error:", error);
+        Alert.alert("Save Error", "Could not process incoming intel.");
     }
-    
-    // 2. Refresh UI from the Single Source of Truth
-    const freshCards = await getAllCards();
-    setCards(freshCards);
   };
-
-
 
  // --- ENGINE 3: THE GRABBER (Retry Logic + Smart Library) ---
   const handleGrabCard = async (offer, version) => {
@@ -755,7 +1812,14 @@ export default function App() {
       console.log(">> GRAB REQUESTED:", offer.title || "Unknown Intel");
       
       const targetId = activePeer?.id || offer.id;
-      const categoryToRequest = radarFilterRef.current || 'general';
+      
+      // Extract the ACTUAL category of the card on the radar, fallback to filter
+      let categoryToRequest = 'general';
+      if (offer && offer.topic) {
+          categoryToRequest = offer.topic.replace('human/', '');
+      } else if (radarFilterRef.current) {
+          categoryToRequest = radarFilterRef.current;
+      }
 
       // FIX: Update the UI to show what's being requested
       if (activePeer) {
@@ -784,10 +1848,12 @@ export default function App() {
       }
 
       if (success && result.data) {
-          const peerName = result.data.senderHandle || activePeer?.name || "Unknown Source";
-          await processAndSaveIncomingCard(result.data, peerName);
+          const peerName = activePeer?.name || "Unknown Source";
+          await processAndSaveIncomingCard(result.data.card, peerName, result.data.timestamp);
       } else {
-          if (result && result.error === 'NO_CARDS') {
+          if (result && result.isRedundant) {
+              Alert.alert("Redundant Intel", "Redundant card. Everything is updated.");
+          } else if (result && result.error === 'NO_CARDS') {
               Alert.alert("No Intel Found", `The target has no cards in the "${categoryToRequest}" category.`);
           } else {
               Alert.alert("Connection Failed", result.error || "Target did not respond after 3 attempts.");
@@ -827,23 +1893,21 @@ export default function App() {
   const broadcastQuestion = useCallback(async (query) => {
     if (!query || query.length === 0) return false;
     try {
-      const questionCard = await createCard(profile.handle, `QUESTION: ${query}`, `Seeking answers for: "${query}"`, "human/question");
-      const signature = await signData(JSON.stringify(questionCard.genesis));
-      questionCard.genesis.signature = signature;
+      const questionCard = await createCard(profile.publicKey, `QUESTION: ${query}`, `Seeking answers for: "${query}"`, "human/question", query, profile.handle);
       await insertOrReplaceCard(questionCard);
 
-      // Refresh UI from source of truth
       const freshCards = await getAllCards();
       setCards(freshCards);
 
-      if (sourceState !== 'BROADCASTING') await toggleBroadcast();
+      handleOfferCard(questionCard);
+
       Alert.alert("Question Broadcast", `Your question is on the mesh.`);
-      return true; // Indicate success
+      return true;
     } catch (error) {
       console.error("Ask Error:", error);
-      return false; // Indicate failure
+      return false;
     }
-  }, [profile.handle, sourceState, toggleBroadcast]);
+  }, [profile]);
 
   const handleAskQuestion = useCallback(async () => {
     if (await broadcastQuestion(searchQuery)) {
@@ -852,25 +1916,41 @@ export default function App() {
   }, [searchQuery, broadcastQuestion]);
 
   const handleForkCard = useCallback(async (originalCard, contextNote) => {
+    if (!originalCard || !contextNote || contextNote.trim() === '') {
+        Alert.alert("Empty Response", "You cannot broadcast a blank message to the mesh.");
+        return;
+    }
     try {
-      const newCard = { ...originalCard };
-      newCard.id = `${profile.handle}-${Date.now()}`;
-      newCard.body = `${originalCard.body}\n\n--- Answer by ${profile.handle} ---\n${contextNote}`;
-      newCard.forkedFrom = originalCard.id;
-      newCard.genesis = { ...originalCard.genesis, author_id: profile.publicKey, timestamp: new Date().toISOString() };
-      const signature = await signData(JSON.stringify(newCard.genesis));
-      newCard.genesis.signature = signature;
-      await insertOrReplaceCard(newCard);
+      const newCard = await forkCard(originalCard, contextNote, profile);
 
-      // Refresh UI from source of truth
+      // --- THE AMNESIA FIX ---
+      const isAnsweringQuestion = originalCard.topic === 'human/question';
+      
+      if (isAnsweringQuestion) {
+          newCard.topic = 'human/answer'; // Prevents the Asker from being auto-prompted
+          let baseTitle = originalCard.title.replace('QUESTION: ', '').trim();
+          newCard.title = `RE: ${baseTitle}`;
+      }
+
+      // Strictly obey the 20-byte limit for the radio broadcast ("RE: " = 4 chars, leaving 16)
+      newCard.subject = `RE: ${originalCard.title.substring(0, 16)}`;
+
+      await insertOrReplaceCard(newCard);
       const freshCards = await getAllCards();
       setCards(freshCards);
+      setCardToFork(null);
       
-      if (sourceState !== 'BROADCASTING') await toggleBroadcast();
+      Alert.alert("Fork Successful", "Your response has been added to the mesh.");
+      
+      setTimeout(() => {
+          handleOfferCard(newCard);
+      }, 500);
+
     } catch (error) {
       console.error("Fork Error:", error);
+      Alert.alert("Error", `Could not fork the card: ${error.message}`);
     }
-  }, [profile, sourceState]);
+  }, [profile]);
   
   const handleAddTrustedSource = async (sourceData) => {
     try {
@@ -883,7 +1963,8 @@ export default function App() {
           uid: sourceData.id, 
           handle: sourceData.payload.handle,
           publicKey: sourceData.id, 
-          timestamp: new Date().toISOString()
+          timestamp: new Date().toISOString(),
+          profile_json: JSON.stringify(sourceData.payload || {})
         };
         await saveTrustedSource(newTrustedSource);
         setTrustedSources(prev => [...prev, newTrustedSource]);
@@ -899,10 +1980,68 @@ export default function App() {
 
   const handleAcceptTransfer = async () => {
     if (pendingRequest) {
-      await sendCardInChunks(pendingRequest.deviceId, pendingRequest.card);
+      const { deviceId, card, requester: recipientHandle, requesterPublicKey: recipientKey } = pendingRequest; 
+      
+      console.log(`>> ESCROW: Pre-signing transfer to ${recipientHandle}...`);
+
+      const myProfile = await loadProfile();
+      const keys = await getOrGenerateKeys();
+      const isoTimestamp = new Date().toISOString();
+      const safeHistory = Array.isArray(card.history) ? card.history : [];
+      
+      const lastSignedEntry = [...safeHistory].reverse().find(e => e.signature);
+      const previousSignature = lastSignedEntry ? lastSignedEntry.signature : card.genesis?.signature;
+      
+      const targetPublicKey = recipientKey || "Unknown";
+      const messageToSign = previousSignature + targetPublicKey;
+      const newSignature = await signData(messageToSign);
+
+      const universalEntry = buildLedgerEntry({
+          action: 'SHARED',
+          fromKey: keys.publicKey, 
+          toKey: targetPublicKey,
+          senderHandle: myProfile.handle || "Unknown",
+          recipientHandle: recipientHandle || "Unknown",
+          signature: newSignature,
+          timestamp: isoTimestamp
+      });
+
+      // 2. Build the Escrow Card (Stale Card + New Signature)
+      const newHistory = [...safeHistory, universalEntry];
+      const calculatedHops = calculateTrueHops(newHistory);
+
+      const escrowCard = {
+          ...card,
+          history: newHistory,
+          hops: calculatedHops,
+          hop_count: calculatedHops
+      };
+
+      // 3. SECURE ESCROW: Write ledger immediately before transmission
+      await insertOrReplaceCard(escrowCard);
+      console.log(`>> DB: Escrow committed to SQLite for ${recipientHandle}.`);
+      
+      const freshCards = await getAllCards();
+      setCards(freshCards);
+
+      global.lastSignedPayload = escrowCard;
+
+      // 4. Generate the header hashes based on the NEW ESCROW card
+      const ledgerHash = generateLedgerHash(escrowCard.history);
+      
+      console.log(`>> HANDSHAKE: Initiating for card ${escrowCard.id} with ledger hash ${ledgerHash}`);
+
+      // 5. Send the ESCROW CARD to the GATT Server
+      await initiateHandshake(global.lastSignedPayload, {
+        type: 'HEADER',
+        id: escrowCard.id,
+        contentHash: escrowCard.hash, // contentHash stays the same
+        ledgerHash: ledgerHash        // ledgerHash reflects the new hop
+      });
+
       setPendingRequest(null);
     }
-  };
+};
 
   const handleDenyTransfer = () => {
     console.log(">> UI: User denied transfer request.");
@@ -914,6 +2053,54 @@ export default function App() {
       setMeshSearchQuery('');
     }
   }, [meshSearchQuery, broadcastQuestion]);
+
+  const fireMeshFlare = async (flareText) => {
+    try {
+      const timestamp = new Date().toISOString();
+      const { publicKey } = await getOrGenerateKeys();
+      const profile = await loadProfile();
+      const authorHandle = profile?.handle || 'Unknown_Operator';
+
+      // 1. Create the Card
+      const newCard = await createCard(
+        publicKey,
+        flareText,
+        `Flare broadcast at ${timestamp}. Seeking intel on the attached subject.`,
+        'human/question',
+        flareText,
+        authorHandle,
+        'QUESTION'
+      );
+
+      // 3. Save it to local database
+      await insertOrReplaceCard(newCard);
+      
+      console.log(`>> FLARE CREATED: ${flareText}`);
+
+      // 4. Set as active broadcast card and start advertising
+      setAdvertisedCard(newCard);
+      const subjectToBroadcast = newCard.subject || newCard.topic || 'Intel';
+      // Truncate subject to a safe length for BLE advertising, consistent with carousel
+      await BluetoothService.startAdvertising(subjectToBroadcast.substring(0, 10));
+
+      // 5. Update UI and give feedback
+      if (sourceState !== 'BROADCASTING') {
+        setSourceState('BROADCASTING');
+      }
+      const freshCards = await getAllCards();
+      setCards(freshCards);
+      Vibration.vibrate(200);
+      if (Platform.OS === 'android') {
+        ToastAndroid.show("Flare broadcast to the mesh.", ToastAndroid.SHORT);
+      } else {
+        Alert.alert("Flare Fired", "Your question is being broadcast to the mesh.");
+      }
+
+    } catch (error) {
+      console.error(">> FLARE FAILED:", error);
+      Alert.alert("Flare Failed", "Could not broadcast to the mesh.");
+    }
+  };
   
   
   // --- UPDATED: HANDLES THE NEW QR & JSON LOGIC ---
@@ -921,6 +2108,62 @@ export default function App() {
     if (isLoading) return; // Guard against multiple scans
     if (typeof dataString !== 'string') return;
     console.log(">> SCANNER: Data received:", dataString);
+
+    // --- NEW: UMPIRE EVENT CHECK-IN ---
+    if (dataString.startsWith('JAWW-UMPIRE:')) {
+      const parts = dataString.split(':');
+      
+      // Payload format: JAWW-UMPIRE:umpireHandle:subject:startTime:umpirePublicKey
+      if (parts.length >= 4) {
+        const umpireHandle = parts[1];
+        const eventSubject = parts[2];
+        const startTime = parts[3];
+        const umpirePublicKey = parts[4] || "UnknownKey";
+        const eventId = `JAWW-UMPIRE:${umpireHandle}:${startTime}`;
+
+        Alert.alert(
+          "Intelligence Event Detected",
+          `Umpire: ${umpireHandle}\nMission Focus: ${eventSubject}\n\nDo you want to opt into this sweep?`,
+          [
+            { text: "Cancel", style: "cancel", onPress: () => setIsScannerVisible(false) },
+            { 
+              text: "Join Event", 
+              onPress: async () => {
+                try {
+                  // 1. Set the Active State for the session
+                  await AsyncStorage.setItem('@jaww_event_start', startTime);
+                  await AsyncStorage.setItem('@jaww_active_event_id', eventId);
+
+                  // 2. Create the permanent Folder in the Oracle Engine
+                  await runQuery(
+                    `INSERT OR IGNORE INTO events (id, name, timestamp, my_authored_count, my_network_reach) VALUES (?, ?, ?, ?, ?)`,
+                    [eventId, `Mission: ${eventSubject}`, parseInt(startTime, 10), 0, 0]
+                  );
+
+                  // 3. Set the UI State
+                  setActiveUmpireEvent({
+                    id: eventId,
+                    umpireHandle,
+                    umpirePublicKey,
+                    subject: eventSubject,
+                    startTime
+                  });
+                  
+                  setIsScannerVisible(false);
+                  Alert.alert("Opted In", `Your app will now securely queue intel regarding "${eventSubject}".`);
+                } catch (e) {
+                  console.error(">> EVENT CHECK-IN FAILED:", e);
+                  Alert.alert("Check-In Failed", "Could not create the event folder.");
+                }
+              }
+            }
+          ]
+        );
+      } else {
+        Alert.alert("Invalid Event QR", "The event QR code is malformed.");
+      }
+      return; // Halt further scan processing
+    }
 
     // --- NEW: JAWW v2 CARD TRANSFER URI ---
     if (dataString.startsWith('jaaw://card/')) {
@@ -947,9 +2190,15 @@ export default function App() {
         setIsLoading(false);
              
         if (result.success && result.data) {
-            await processAndSaveIncomingCard(result.data, targetHandle);
+            await processAndSaveIncomingCard(result.data.card, targetHandle, result.data.timestamp);
         } else {
-            Alert.alert("Connection Failed", result.error || `Could not connect to operator "${targetHandle}". They may be out of range or offline.`);
+            if (result && result.isRedundant) {
+                Alert.alert("Redundant Intel", "Redundant card. Everything is updated.");
+            } else if (result && result.error === 'NO_CARDS') {
+                Alert.alert("No Intel Found", `The target has no cards in the category.`);
+            } else {
+                Alert.alert("Connection Failed", result?.error || "Target did not respond.");
+            }
         }
         return;
     }
@@ -973,10 +2222,16 @@ export default function App() {
         
         setIsLoading(false);
              
-        if (result.success) {
-            await processAndSaveIncomingCard(result.data, targetHandle);
+        if (result.success && result.data) {
+            await processAndSaveIncomingCard(result.data.card, targetHandle, result.data.timestamp);
         } else {
-            Alert.alert("Connection Failed", `Could not connect to operator "${targetHandle}". They may be out of range or offline.`);
+            if (result && result.isRedundant) {
+                Alert.alert("Redundant Intel", "Redundant card. Everything is updated.");
+            } else if (result && result.error === 'NO_CARDS') {
+                Alert.alert("No Intel Found", `The target has no cards in the category.`);
+            } else {
+                Alert.alert("Connection Failed", result?.error || "Target did not respond.");
+            }
         }
         return;
     }
@@ -1038,7 +2293,7 @@ export default function App() {
               if (!alreadyExists) {
                   console.log(`>> CONFIRMATION: Logging transfer to ${remoteUser} and incrementing hops.`);
                   const updatedHistory = [...existingCard.history, lastIncomingEntry];
-                  const updatedCard = { ...existingCard, history: updatedHistory, hops: (existingCard.hops || 0) + 1 };
+                  const updatedCard = { ...existingCard, history: updatedHistory, hops: calculateTrueHops(updatedHistory) };
                   const newCards = cards.map(c => c.id === updatedCard.id ? updatedCard : c);
                   await updateLibrary(newCards);
                   Alert.alert("Transfer Confirmed", `Your ledger is updated for the transfer to ${remoteUser}.`);
@@ -1080,7 +2335,7 @@ export default function App() {
           const lastOwner = incomingCard.history[incomingCard.history.length - 1].user;
           const newEntry = { action: 'TRANSFER', user: localUser, from: lastOwner, timestamp: new Date().toISOString() };
           const newHistory = [...incomingCard.history, newEntry];
-          const newCard = { ...incomingCard, history: newHistory, hops: (incomingCard.hops || 0) + 1 };
+          const newCard = { ...incomingCard, history: newHistory, hops: calculateTrueHops(newHistory) };
           await updateLibrary([newCard, ...cards]);
           Alert.alert("Transfer Complete", `Intel received from ${lastOwner}.`);
         }
@@ -1094,12 +2349,56 @@ export default function App() {
     }
   };
   
+  const [isSyncing, setIsSyncing] = useState(false); // Add this at the top of your App component
+
+  const handleAutoSync = async (cardId) => {
+      if (isSyncing) return; // Prevent double-triggering
+      
+      try {
+          setIsSyncing(true);
+          const card = await getCardById(cardId);
+          if (!card) {
+              setIsSyncing(false);
+              return;
+          }
+
+          const myProfile = await loadProfile();
+          const myHandle = myProfile?.handle || "Unknown";
+
+          const ledgerHandles = card.history
+              .flatMap(entry => [entry.author, entry.senderHandle, entry.recipientHandle, entry.user])
+              .filter(handle => handle && handle !== myHandle);
+          
+          const uniqueTargets = [...new Set(ledgerHandles)];
+
+          if (uniqueTargets.length === 0) {
+              if (Platform.OS === 'android') ToastAndroid.show("No other operators in ledger.", ToastAndroid.SHORT);
+              setIsSyncing(false);
+              return;
+          }
+
+          console.log(`>> MESH: Auto-Sync targeting: ${uniqueTargets.join(', ')}`);
+          
+          await BluetoothService.startAdvertising().catch(() => {});
+          setIsSyncScreenVisible(true); 
+
+          await BluetoothService.pingTargetsForSync(card.id, uniqueTargets, myHandle);
+          
+          // Reset sync state after a delay or when screen closes
+          setTimeout(() => setIsSyncing(false), 5000); 
+          
+      } catch (error) {
+          console.error(">> MESH: Auto-Sync Failed", error);
+          setIsSyncing(false);
+      }
+  };
+
   const handleOnboardingComplete = useCallback(async (p) => { 
       console.log(">> ONBOARDING: Creating Identity for", p.handle);
       try {
         const keys = await getOrGenerateKeys(); 
         if (!keys) throw new Error("Key Generation Failed");
-        const publicProfile = { ...p, publicKey: keys.publicKey, interests: p.interests || [] };
+        const publicProfile = { ...p, publicKey: keys.publicKey };
         await saveProfile(publicProfile); 
         setProfile(publicProfile); 
         BluetoothService.setHandle(publicProfile.handle);
@@ -1109,6 +2408,87 @@ export default function App() {
           Alert.alert("Security Error", "Could not establish Identity."); 
       }
   }, []);
+
+  const handleNewUmpireOperation = async () => {
+    const startTime = Date.now();
+    const eventId = `JAWW-EVENT:${profile.handle}:${startTime}`;
+    const eventName = `Hosted Assembly @ ${new Date(startTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+
+    try {
+      // 1. Set active state for the session
+      await AsyncStorage.setItem('@jaww_active_event_id', eventId);
+
+      // 2. Create the permanent Folder in the Oracle Engine, flagging it as an Umpire event
+      await runQuery(
+        `INSERT OR IGNORE INTO events (id, name, timestamp, is_umpire) VALUES (?, ?, ?, ?)`,
+        [eventId, eventName, Math.floor(startTime / 1000), 1]
+      );
+
+      // 3. Update state to trigger the QR modal (which will be built in Phase 2)
+      setActiveUmpireEvent({ id: eventId, name: eventName });
+      
+      // We can also close the profile modal if it's open
+      setIsProfileVisible(false);
+      setIsUmpireEventModalVisible(true);
+
+    } catch (e) {
+      console.error(">> UMPIRE EVENT CREATION FAILED:", e);
+      Alert.alert("Error", "Could not create umpire event folder.");
+    }
+  };
+
+  const handleEndUmpireEvent = () => {
+    handleEndEvent();
+    setIsUmpireEventModalVisible(false);
+  };
+
+  const handleBeginUmpireBroadcast = (modalSubject) => {
+    setIsUmpireEventModalVisible(false);
+    
+    // 1. Update the Host's active state to remember its own mission
+    setActiveUmpireEvent(prev => ({ ...prev, subject: modalSubject }));
+    
+    // 2. Blast the exact subject passed from the Modal UI
+    BluetoothService.startAdvertising(modalSubject, true, activeUmpireEvent.id.split(':')[2]);
+  };
+
+  // --- NEW: LEAVE EVENT LOGIC ---
+  const handleLeaveEvent = () => {
+    const subject = activeUmpireEvent?.subject || 'Mission';
+    
+    // 1. Clear the active event state
+    setActiveUmpireEvent(null);
+    setLastSeenUmpireId(null);
+    
+    // 2. Trigger the 10-second fade-out message
+    setEventOverMessage(`JAWW EVENT: ${subject.toUpperCase()} is over! Check the Oracle folder for the event cards!`);
+    setTimeout(() => {
+        setEventOverMessage(null);
+    }, 10000); // 10 seconds
+  };
+
+  // --- NEW: MANUAL SUBMIT OVERRIDE ---
+  const manualUmpireSubmit = async (card) => {
+    if (!lastSeenUmpireId) {
+        Alert.alert("Radar Searching...", "Scanning for the Host's signal. Please ensure their broadcast is active, wait a few seconds, and try again.");
+        return;
+    }
+    try {
+        if (Platform.OS === 'android') ToastAndroid.show("Initiating manual transfer...", ToastAndroid.SHORT);
+        
+        // Force the radio payload
+        const result = await BluetoothService.sendUmpirePayload(lastSeenUmpireId, [card], profile.handle);
+        
+        if (result && result.success) {
+            await markUmpireQueueAsSynced([card.id]);
+            Alert.alert("Success", "Intel manually submitted to Umpire!");
+        } else {
+            Alert.alert("Transfer Failed", "Could not connect to Umpire. Are you out of range?");
+        }
+    } catch (e) {
+         Alert.alert("Error", e.message);
+    }
+  };
 
   const handleTrustNode = async (authorId) => {
     if (!authorId) {
@@ -1128,14 +2508,19 @@ export default function App() {
     }
   };
 
-  const handleRequestReview = (cardToReview) => {
-    const reviewCardData = {
-      ...cardToReview,
-      title: `REVIEW: ${cardToReview.title}`,
-    };
-    setCreateInitialData(reviewCardData);
-    setSelectedCard(null);
-    setIsCreateVisible(true);
+  const handleRequestReview = async (cardToReview) => {
+    try {
+      const newCard = await forkCard(cardToReview, "Requesting network review for this card.", profile);
+      await insertOrReplaceCard(newCard);
+      const freshCards = await getAllCards();
+      setCards(freshCards);
+      setSelectedCard(null);
+      Alert.alert("Review Requested", "Your request has been added to the mesh.");
+      handleOfferCard(newCard);
+    } catch (error) {
+      console.error("Review Request Error:", error);
+      Alert.alert("Error", `Could not request review: ${error.message}`);
+    }
   };
 
   const handleClearLibrary = async () => {
@@ -1225,7 +2610,7 @@ export default function App() {
         const currentFilters = { 
             activeTab, 
             activeTopicFilter, 
-            profileHandle: profile?.handle || 'unknown'
+            profileHandle: profile?.publicKey || 'unknown'
         };
 
         if (query.length > 0) {
@@ -1258,7 +2643,100 @@ export default function App() {
       clearTimeout(delayDebounceFn); // Kill the old timer
       isMounted = false;             // Mark the old query as invalid
     };
-  }, [searchQuery, activeTab, activeTopicFilter, profile?.handle, isDbReady]);
+  }, [searchQuery, activeTab, activeTopicFilter, profile?.publicKey, isDbReady]);
+
+    // --- PHASE 3: THE SMART CAROUSEL LOOP ---
+  useEffect(() => {
+    let carouselInterval = null;
+    let isActive = true; // Safe unmount flag
+    const isCarouselMode = viewMode === 'broadcast';
+
+    const startCarousel = async () => {
+      // Grab cards that the user explicitly toggled "Feature This Intel" on
+      const allUserCards = (await getAllCards()).filter(c => c.is_broadcast_enabled === 1);
+      
+      if (!isActive) return;
+
+      if (!allUserCards || allUserCards.length === 0) {
+        console.log(">> CAROUSEL: No featured cards to broadcast.");
+        // When in broadcast mode but no cards are featured, we might want a default advertisement.
+        // For now, it just won't broadcast anything from the carousel.
+        return;
+      }
+
+      let currentIndex = 0;
+
+      const initialCard = allUserCards[currentIndex];
+      setAdvertisedCard(initialCard);
+      await BluetoothService.startAdvertising(initialCard.subject || initialCard.title.substring(0, 10));
+      console.log(`>> CAROUSEL: Broadcasting initial card: ${initialCard.title}`);
+      
+      currentIndex = (currentIndex + 1) % allUserCards.length;
+
+      carouselInterval = setInterval(async () => {
+        const currentCard = allUserCards[currentIndex];
+        
+        setAdvertisedCard(currentCard);
+        await BluetoothService.startAdvertising(currentCard.subject || currentCard.title.substring(0, 10));
+        
+        console.log(`>> CAROUSEL: Broadcasting next card: ${currentCard.title}`);
+
+        currentIndex = (currentIndex + 1) % allUserCards.length;
+      }, 60000);
+    };
+
+    if (isCarouselMode) {
+      startCarousel();
+    }
+
+    return () => {
+      isActive = false; 
+      if (carouselInterval) {
+        clearInterval(carouselInterval);
+        console.log(">> CAROUSEL: Broadcast loop stopped.");
+        // When leaving broadcast mode, we should explicitly stop advertising
+        // if the carousel was the one managing it.
+        BluetoothService.stopBroadcasting();
+      }
+    };
+  }, [viewMode]); 
+
+  const filteredDevices = useMemo(() => {
+    // 1. Identify any incoming Flare Answers. These ALWAYS pierce the filter.
+    const answers = nearbyDevices.filter(d => d.subject && d.subject.startsWith('RE:'));
+
+    if (!radarFilter) {
+      // No filter? Show answers at the top, then everything else.
+      const others = nearbyDevices.filter(d => !(d.subject && d.subject.startsWith('RE:')));
+      return [...answers, ...others];
+    }
+
+    // 2. If a standard filter is active, apply bitmask logic ONLY to non-answer cards.
+    const UI_TO_BITMASK = { 'food': 1, 'education': 2, 'fitness': 3, 'professional': 4, 'fun': 5 };
+    const catVal = UI_TO_BITMASK[radarFilter];
+    
+    if (!catVal) return nearbyDevices;
+
+    const filterBit = 1 << (catVal - 1);
+    const filteredOthers = nearbyDevices.filter(d => {
+      const isAnswer = d.subject && d.subject.startsWith('RE:');
+      if (isAnswer) return false; // Already grabbed above
+      return (d.categoryBitmask || 0) & filterBit;
+    });
+
+    // 3. Return the priority answers first, followed by the filtered standard nodes.
+    return [...answers, ...filteredOthers];
+  }, [nearbyDevices, radarFilter]);
+
+  useEffect(() => {
+    if (radarFilter && filteredDevices.length === 0 && nearbyDevices.length > 0) {
+      Alert.alert(
+        "Channel Empty",
+        `Nobody in the local mesh is broadcasting ${radarFilter.toUpperCase()} intel right now... dropping back to all channels.`
+      );
+      setRadarFilter(null);
+    }
+  }, [filteredDevices, radarFilter, nearbyDevices]); 
 
 // === 1. THE IRON GATE (MUST BE FIRST) ===
   if (!isDbReady) { 
@@ -1277,9 +2755,54 @@ export default function App() {
     );
   }
 
+
   // === 2. PERMISSIONS & ONBOARDING ===
   if (!hasPermissions) return <View style={styles.center}><TouchableOpacity onPress={requestPermissions}><Text style={styles.textGreen}>GRANT ACCESS</Text></TouchableOpacity></View>;
   if (!profile.handle) return <Onboarding visible={true} onComplete={handleOnboardingComplete} />;
+
+  // Check if the user has authored any cards.
+  const hasAuthoredIntel = vaultCards.some(card => card.genesis.author_id === profile.publicKey);
+
+  // === 3. THE GATEKEEPER UI ===
+  if (!hasAuthoredIntel) {
+    return (
+      <View style={{flex: 1, backgroundColor: '#050505', justifyContent: 'center', alignItems: 'center', padding: 20}}>
+        <StatusBar barStyle="light-content" />
+        <Text style={{color: '#ff0000', fontFamily: 'Courier', fontWeight: 'bold', fontSize: 18, textAlign: 'center', marginBottom: 20}}>
+          // ACCESS RESTRICTED //
+        </Text>
+        <Text style={{color: '#ccc', fontFamily: 'Courier', fontSize: 16, textAlign: 'center', marginBottom: 40, lineHeight: 24}}>
+          Your Armory is empty. You must mint at least one piece of Intel to unlock the Mesh.
+        </Text>
+        <TouchableOpacity 
+          onPress={() => setIsCreateVisible(true)} 
+          style={{
+            paddingHorizontal: 20, 
+            paddingVertical: 15, 
+            backgroundColor: '#003300', 
+            borderRadius: 8, 
+            borderWidth: 1, 
+            borderColor: '#00ff00'
+          }}
+        >
+          <Text style={{color: '#00ff00', fontWeight: 'bold', fontSize: 16, fontFamily: 'Courier'}}>
+            [ + MINT FIRST INTEL ]
+          </Text>
+        </TouchableOpacity>
+        
+        {/* We must render the modal here so the button can open it */}
+        <CreateCardModal 
+          visible={isCreateVisible} 
+          onClose={() => {
+              setIsCreateVisible(false);
+              setCreateInitialData(null); // Clear data when closing
+          }} 
+          onSave={handleCreateCard}
+          initialData={createInitialData}
+        />
+      </View>
+    );
+  }
 
   const isBroadcasting = sourceState === 'BROADCASTING';
 
@@ -1289,7 +2812,7 @@ export default function App() {
       <StatusBar barStyle="light-content" />
       <View style={styles.topHeader}>
         <TouchableOpacity onPress={toggleBroadcast} style={[styles.broadcastBtnCompact, isBroadcasting && {backgroundColor:'#003300', borderColor:'#00ff00'}]}>
-            <Text style={styles.broadcastText}>{isBroadcasting ? '(( ON AIR ))' : '📡 BROADCAST'}</Text>
+            <Text style={styles.broadcastText}>{isBroadcasting ? '(( ON AIR ))' : '📡 SYNC'}</Text>
         </TouchableOpacity>
         <TouchableOpacity style={styles.btnSmallOutline} onPress={() => setIsTrustedModalVisible(true)}><Text style={styles.btnTextGray}>TRUSTED</Text></TouchableOpacity>
         <Text style={styles.headerRank}>OP: {profile.handle.substring(0,8).toUpperCase()}</Text>
@@ -1297,69 +2820,18 @@ export default function App() {
 
       {viewMode === 'broadcast' ? (
           <View style={{flex: 1, alignItems:'center', justifyContent:'center'}}>
-              <Text style={{color:'#00ff00', fontSize: 24, fontWeight:'bold'}}>BROADCASTING</Text>
+              <Text style={{color:'#00ff00', fontSize: 24, fontWeight:'bold'}}>LEDGER SYNC</Text>
               <Text style={{color:'#666', fontSize:12, marginTop: 10, fontFamily: 'Courier'}}>BEACON ACTIVE • DISCOVERABLE</Text>
               <ActivityIndicator color="#00ff00" style={{marginTop: 20}} />
               <TouchableOpacity onPress={toggleBroadcast} style={styles.btnOutline}><Text style={styles.textGray}>STOP SIGNAL</Text></TouchableOpacity>
           </View>
       ) : viewMode === 'radar' ? (
-          <View style={{flex: 1, padding: 20, alignItems: 'center', justifyContent: 'flex-start', paddingTop: 10, paddingBottom: 120}}>
-            <View style={{width: '100%', marginTop: 20, marginBottom: 20}}>
-              <Text style={styles.meshSearchLabel}>Broadcast a Question to the Mesh</Text>
-              <View style={{flexDirection: 'row', padding:10, alignItems: 'center', width: '100%'}}>
-                <TextInput
-                  style={styles.meshSearchInput}
-                  placeholder="Ask around..."
-                  placeholderTextColor="#666"
-                  value={meshSearchQuery}
-                  onChangeText={setMeshSearchQuery}
-                  onSubmitEditing={handleMeshSearch}
-                />
-                <TouchableOpacity onPress={handleMeshSearch} style={styles.flareButton}>
-                  <Text style={styles.flareButtonText}>FLARE</Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-              <View style={styles.radarBox}>
-                  <View style={styles.gridLineVertical} />
-                  <View style={styles.gridLineHorizontal} />
-                  <View style={styles.gridCenter}><StatusOrb status={sourceState} /></View>
-                  {nearbyDevices.map((item) => {
-                      const pos = item.position || {x:50, y:50}; 
-                      const category = item.offer && item.offer.topic ? item.offer.topic.split('/')[1] || item.offer.topic : 'UNKNOWN';
-                      return (
-                        <TouchableOpacity key={item.stableId} style={{ position: 'absolute', left: `${pos.x}%`, top: `${pos.y}%`, width: 60, height: 60, alignItems: 'center', justifyContent: 'center' }} onPress={() => handleRadarConnect(item)}>
-                          <View style={styles.radarBlip}><View style={{width: 6, height: 6, backgroundColor: '#fff', borderRadius: 3}}/></View>
-                          <Text numberOfLines={1} style={{ position: 'absolute', top: 35, width: 90, textAlign: 'center', color: '#00ff00', fontSize: 9, fontFamily: 'Courier', fontWeight: 'bold', backgroundColor:'rgba(0,0,0,0.6)' }}>
-                              {item.name ? item.name.toUpperCase() : 'SIGNAL'}
-                          </Text>
-                          <Text numberOfLines={1} style={{ position: 'absolute', top: 54, width: 100, textAlign: 'center', color: '#00aa00', fontSize: 8, fontFamily: 'Courier', fontWeight: 'bold' }}>
-                             {item.status ? item.status : (item.offer && item.offer.title && item.offer.title !== 'Scanning...' ? item.offer.title : `[${getCategoryIcon(category)} ${category.toUpperCase()}]`)}
-                          </Text>
-                        </TouchableOpacity>
-                      );
-                  })}
-              </View>
-              <TouchableOpacity onPress={toggleBroadcast} style={[styles.btnPrimary, { marginTop: 20, width: '80%' }, isBroadcasting && { backgroundColor: '#003300', borderColor: '#00ff00', borderWidth: 1 }]}>
-                  <Text style={[styles.btnTextBlack, isBroadcasting && { color: '#00ff00' }]}>{isBroadcasting ? 'STOP BROADCAST' : 'START BROADCAST'}</Text>
-              </TouchableOpacity>
-              <View style={styles.filterButtonContainer}>
-                  {SECTIONS.map(s => (
-                      <TouchableOpacity 
-                          key={s.id}
-                          onPress={() => {
-                              const newFilter = radarFilter === s.id ? null : s.id;
-                              setRadarFilter(newFilter);
-                              radarFilterRef.current = newFilter;
-                          }}
-                          style={[styles.filterButton, radarFilter === s.id && styles.filterButtonActive]}
-                      >
-                          <Text style={styles.filterButtonText}>{s.label}</Text>
-                      </TouchableOpacity>
-                  ))}
-              </View>
-              <Text style={{color: '#004400', marginTop: 20, fontFamily: 'Courier', fontSize: 10}}>// TACTICAL SCANNER: ACTIVE //</Text>
+        <View style={{flex: 1}}>
+          <TacticalScanner devices={filteredDevices} onNodeTap={handleRadarConnect} isScanning={isScanning} />
+          <View style={{position: 'absolute', bottom: 0, left: 0, right: 0}}>
+            <FlareBeacon onFireFlare={fireMeshFlare} isBroadcasting={isBroadcasting} />
           </View>
+        </View>
       ) : (
           <>
             <View style={{minHeight: 60, alignItems: 'center' }}>
@@ -1412,6 +2884,8 @@ export default function App() {
         return (
             <CardItem
                 item={augmentedItem}
+                activeUmpireEvent={activeUmpireEvent}
+                manualUmpireSubmit={manualUmpireSubmit}
                 onPress={() => setSelectedCard(item)}
                 onLongPress={() => {
                     Alert.alert(
@@ -1423,11 +2897,10 @@ export default function App() {
                                 text: "Delete",
                                 style: "destructive",
                                 onPress: async () => {
-                                    // Filter out this specific card
-                                    const newLibrary = cards.filter(c => c.id !== item.id);
-                                    setCards(newLibrary);
-                                    await saveLibrary(newLibrary);
-                                }
+                                await deleteCard(item.id);
+                                const freshCards = await getAllCards();
+                                setCards(freshCards);
+                            }
                             }
                         ]
                     );
@@ -1457,6 +2930,173 @@ export default function App() {
           </>
       )}
 
+      {/* --- NEW: HOST QR RECALL MODAL --- */}
+      <Modal visible={isHostQRVisible} transparent={true} animationType="fade">
+          <View style={{ flex: 1, backgroundColor: 'rgba(15, 23, 42, 0.95)', justifyContent: 'center', alignItems: 'center', padding: 20 }}>
+              <Text style={{ color: '#38BDF8', fontSize: 24, fontWeight: 'bold', fontFamily: 'Courier', marginBottom: 10 }}>ACTIVE EVENT</Text>
+              <Text style={{ color: '#9CA3AF', fontSize: 16, textAlign: 'center', marginBottom: 30 }}>
+                  Mission: {activeUmpireEvent?.subject}
+              </Text>
+              
+              <View style={{ padding: 20, backgroundColor: '#0F172A', borderRadius: 16, borderWidth: 2, borderColor: '#38BDF8' }}>
+                  <QRCode 
+                      value={activeUmpireEvent?.id ? `JAWW-UMPIRE:${activeUmpireEvent.id.split(':')[1]}:${activeUmpireEvent.subject}:${activeUmpireEvent.id.split(':')[2]}:${profile?.publicKey || 'UnknownKey'}` : 'PENDING'} 
+                      size={250} 
+                      color="#F8FAFC" 
+                      backgroundColor="#0F172A" 
+                  />
+              </View>
+
+              <TouchableOpacity 
+                  onPress={() => setIsHostQRVisible(false)} 
+                  style={{ marginTop: 40, paddingVertical: 15, paddingHorizontal: 40, backgroundColor: '#334155', borderRadius: 8, borderWidth: 1, borderColor: '#475569' }}
+              >
+                  <Text style={{ color: '#FFF', fontWeight: 'bold', fontFamily: 'Courier' }}>CLOSE RADAR</Text>
+              </TouchableOpacity>
+          </View>
+      </Modal>
+
+      {/* --- NEW: EVENT OVER MESSAGE --- */}
+      {eventOverMessage && (
+          <View style={{ backgroundColor: '#1E293B', padding: 12, borderRadius: 8, marginBottom: 15, marginHorizontal: 20, borderWidth: 1, borderColor: '#38BDF8', alignItems: 'center' }}>
+              <Text style={{ color: '#38BDF8', fontWeight: 'bold', textAlign: 'center', fontFamily: 'Courier' }}>{eventOverMessage}</Text>
+          </View>
+      )}
+
+      {/* --- TACTICAL EVENT ACTION BAR (INTEGRATED BOX) --- */}
+      {activeUmpireEvent && !eventOverMessage && (
+        <View style={{ width: '95%', alignSelf: 'center', marginBottom: 20 }}>
+            
+            <View style={{ 
+                backgroundColor: '#1E293B', 
+                padding: 12, 
+                borderRadius: 8, 
+                borderWidth: 1, 
+                borderColor: '#475569',
+                elevation: 4,
+                shadowColor: '#000',
+                shadowOffset: { width: 0, height: 2 },
+                shadowOpacity: 0.3,
+                shadowRadius: 3,
+            }}>
+                {/* 1. INTERNAL STATUS HEADER */}
+                <Text style={{ 
+                    color: '#94A3B8', 
+                    fontSize: 10, 
+                    fontFamily: 'Courier', 
+                    fontWeight: 'bold', 
+                    textAlign: 'center', 
+                    marginBottom: 12, // Spacing before buttons
+                    letterSpacing: 1.2,
+                    borderBottomWidth: 1,
+                    borderBottomColor: '#334155', // Subtle divider
+                    paddingBottom: 8
+                }}>
+                    {activeUmpireEvent.id?.split(':')[1] === profile?.handle 
+                        ? `HOSTING JAWW EVENT: ${activeUmpireEvent.subject?.toUpperCase()}!` 
+                        : `JAWW EVENT: ${activeUmpireEvent.subject?.toUpperCase()}!`}
+                </Text>
+
+                {/* 2. BUTTON TRAY */}
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                    
+                    {/* PRIMARY ACTION: Intel Button (Global) */}
+                    <TouchableOpacity 
+                        onPress={handleOpenEventCard} 
+                        style={{ 
+                            flex: 1, 
+                            backgroundColor: '#0EA5E9', 
+                            paddingVertical: 12, 
+                            borderRadius: 6, 
+                            borderWidth: 1, 
+                            borderColor: '#38BDF8', 
+                            flexDirection: 'row', 
+                            alignItems: 'center', 
+                            justifyContent: 'center' 
+                        }}
+                    >
+                        <Feather name="target" size={18} color="#FFF" style={{marginRight: 6}} />
+                        <Text style={{color: '#FFF', fontWeight: 'bold', fontSize: 11, fontFamily: 'Courier'}}>+ INTEL</Text>
+                    </TouchableOpacity>
+
+                    {/* VIEW A: UMPIRE CONTROLS (Only for Host) */}
+                    {activeUmpireEvent.id?.split(':')[1] === profile?.handle && (
+                        <View style={{ flexDirection: 'row', flex: 2, gap: 6 }}>
+                            <TouchableOpacity 
+                                onPress={() => setIsHostQRVisible(true)} 
+                                style={{ 
+                                    backgroundColor: '#334155', 
+                                    width: 44, 
+                                    height: 44, 
+                                    borderRadius: 6, 
+                                    borderWidth: 1, 
+                                    borderColor: '#475569', 
+                                    justifyContent: 'center', 
+                                    alignItems: 'center' 
+                                }}
+                            >
+                                <Feather name="maximize" size={18} color="#FFF" />
+                            </TouchableOpacity>
+
+                            <TouchableOpacity 
+                                onPress={() => setIsHostDashboardVisible(true)} 
+                                style={{ 
+                                    flex: 1, 
+                                    backgroundColor: '#F59E0B', 
+                                    borderRadius: 6, 
+                                    borderWidth: 1, 
+                                    borderColor: '#FCD34D', 
+                                    justifyContent: 'center', 
+                                    alignItems: 'center' 
+                                }}
+                            >
+                                <Feather name="bar-chart-2" size={16} color="#FFF" />
+                                <Text style={{color: '#FFF', fontWeight: 'bold', fontSize: 9, fontFamily: 'Courier', marginTop: 2}}>DB</Text>
+                            </TouchableOpacity>
+
+                            <TouchableOpacity 
+                                onPress={handleEndEvent} 
+                                style={{ 
+                                    flex: 1, 
+                                    backgroundColor: '#EF4444', 
+                                    borderRadius: 6, 
+                                    borderWidth: 1, 
+                                    borderColor: '#F87171', 
+                                    justifyContent: 'center', 
+                                    alignItems: 'center' 
+                                }}
+                            >
+                                <Feather name="x-square" size={16} color="#FFF" />
+                                <Text style={{color: '#FFF', fontWeight: 'bold', fontSize: 9, fontFamily: 'Courier', marginTop: 2}}>END</Text>
+                            </TouchableOpacity>
+                        </View>
+                    )}
+
+                    {/* VIEW B: PARTICIPANT CONTROLS (Only for Non-Hosts) */}
+                    {activeUmpireEvent.id?.split(':')[1] !== profile?.handle && (
+                        <TouchableOpacity 
+                            onPress={handleLeaveEvent} 
+                            style={{ 
+                                flex: 1, 
+                                backgroundColor: '#EF4444', 
+                                paddingVertical: 12, 
+                                borderRadius: 6, 
+                                borderWidth: 1, 
+                                borderColor: '#F87171', 
+                                flexDirection: 'row', 
+                                alignItems: 'center', 
+                                justifyContent: 'center' 
+                            }}
+                        >
+                            <Feather name="log-out" size={18} color="#FFF" style={{marginRight: 6}} />
+                            <Text style={{color: '#FFF', fontWeight: 'bold', fontSize: 11, fontFamily: 'Courier'}}>LEAVE</Text>
+                        </TouchableOpacity>
+                    )}
+                </View>
+            </View>
+        </View>
+      )}
+
       <View style={styles.footer}>
         <TouchableOpacity onPress={() => setIsOracleVisible(true)} style={styles.footBtn}><Text style={styles.footText}>ORACLE</Text></TouchableOpacity>
         <TouchableOpacity onPress={() => setIsScannerVisible(true)} style={styles.footBtn}><Text style={styles.footText}>SCAN QR</Text></TouchableOpacity>
@@ -1469,6 +3109,7 @@ export default function App() {
       <HandshakeModal 
           visible={!!activePeer && !isBrowseVisible} 
           peer={activePeer} 
+          category={activePeerCategory}
           isLoading={isLoading} // Use global loading state
           onClose={handleDismiss} 
           onGrab={(offer) => handleGrabCard(offer, 'standard')} 
@@ -1491,7 +3132,17 @@ export default function App() {
     initialData={createInitialData} // <--- PASS THE DATA HERE
 />
       <ScannerModal visible={isScannerVisible} onClose={()=>setIsScannerVisible(false)} onScanSuccess={handleRealScan} />
-      <TrustedSourcesModal visible={isTrustedModalVisible} onClose={() => setIsTrustedModalVisible(false)} sources={trustedSources} onAddSource={handleAddTrustedSource} />
+      <TrustedSourcesModal 
+          visible={isTrustedModalVisible} 
+          onClose={() => setIsTrustedModalVisible(false)} 
+          sources={trustedSources} 
+          cards={vaultCards}
+          onFilterBySource={(pubKey) => {
+              setSearchQuery(`source:${pubKey}`);
+              setIsTrustedModalVisible(false);
+          }}
+          onAddSource={handleAddTrustedSource} 
+      />
       <OracleModal 
     visible={isOracleVisible} 
     onClose={() => setIsOracleVisible(false)} 
@@ -1501,6 +3152,8 @@ export default function App() {
         setIsOracleVisible(false);
         setTimeout(() => setSelectedCard(card), 100);
     }}
+    onEndEvent={handleEndEvent}
+    refreshTrigger={refreshTrigger}
     // This handler makes the footer buttons work
     onNavigate={(mode) => {
         setIsOracleVisible(false); // Close Oracle first
@@ -1511,29 +3164,104 @@ export default function App() {
         }, 200);
     }}
 />
-      <IdentityModal visible={isProfileVisible} onClose={()=>setIsProfileVisible(false)} profile={profile} library={cards} onReset={async()=>{await AsyncStorage.clear();}} onClearLibrary={handleClearLibrary} />
-      <CardDetailModal 
-    visible={!!selectedCard} 
-    card={selectedCard} 
-    onClose={() => setSelectedCard(null)}
-    onFork={(c) => { setCardToFork(c); setSelectedCard(null); }}
-    onChain={() => { setChainCard(selectedCard); setSelectedCard(null); }}
-    currentUserHandle={profile.handle}
-    onRequestReview={handleRequestReview}
+      <IdentityModal 
+        visible={isProfileVisible} 
+        onClose={()=>setIsProfileVisible(false)} 
+        profile={profile} 
+        library={cards} 
+        onReset={async()=>{await AsyncStorage.clear();}} 
+        onClearLibrary={handleClearLibrary}
+        onStartNewEvent={handleNewUmpireOperation}
+      />
+      <UmpireEventModal
+        visible={isUmpireEventModalVisible}
+        onClose={() => setIsUmpireEventModalVisible(false)}
+        event={activeUmpireEvent}
+        onBegin={handleBeginUmpireBroadcast}
+        onEnd={handleEndUmpireEvent}
+        leaderboard={leaderboard}
+      />
+      <CardDetailModal
+      visible={!!selectedCard}
+      card={selectedCard}
+      onClose={() => setSelectedCard(null)}
+      onFork={(c) => { setCardToFork(c); setSelectedCard(null); }}
+      onChain={() => { setChainCard(selectedCard); setSelectedCard(null); }}
+      currentUserHandle={profile.handle}
+      onRequestReview={handleRequestReview}
+      onMeshSync={handleAutoSync}
 
-    // --- THE ENHANCE FUNCTION ---
-    onEnhance={(cardToCopy) => {
+      // --- THE ENHANCE FUNCTION ---
+      onEnhance={(cardToCopy) => {
         setCreateInitialData(cardToCopy); // 1. Copy the text
         setSelectedCard(null);            // 2. Close the reader
         setIsCreateVisible(true);         // 3. Open the editor
     }}
     onBlockOperator={handleBlockOperator}
+    onOffer={handleOfferCard}
 />
       <TransferRequestModal 
         visible={!!pendingRequest}
         request={pendingRequest}
         onAccept={handleAcceptTransfer}
         onDeny={handleDenyTransfer}
+      />
+
+      {/* --- SUCCESS FLARE ANIMATION --- */}
+      {showSyncFlare && (
+        <View style={[StyleSheet.absoluteFill, {justifyContent: 'center', alignItems: 'center', zIndex: 9999, backgroundColor: 'rgba(0,0,0,0.8)'}]}>
+          <Animated.View style={{backgroundColor: '#10B981', padding: 30, borderRadius: 20, alignItems: 'center', borderWidth: 2, borderColor: '#34D399'}}>
+            <Feather name="check-circle" size={60} color="#FFF" />
+            <Text style={{color: '#FFF', fontWeight: 'bold', marginTop: 15, fontFamily: 'Courier', fontSize: 18}}>PAYLOAD SECURED</Text>
+            <Text style={{color: '#D1FAE5', marginTop: 5, fontFamily: 'Courier', fontSize: 12}}>Umpire has received your intel.</Text>
+          </Animated.View>
+        </View>
+      )}
+
+      {/* --- NEW: HOST DASHBOARD MODAL --- */}
+      <Modal visible={isHostDashboardVisible} transparent={true} animationType="slide">
+          <View style={{ flex: 1, backgroundColor: 'rgba(15, 23, 42, 0.95)', paddingTop: 60, paddingHorizontal: 20 }}>
+              
+              {/* Header */}
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+                  <Text style={{ color: '#F59E0B', fontSize: 24, fontWeight: 'bold', fontFamily: 'Courier' }}>LIVE DASHBOARD</Text>
+                  <TouchableOpacity onPress={() => setIsHostDashboardVisible(false)}>
+                      <Feather name="x-circle" size={28} color="#94A3B8" />
+                  </TouchableOpacity>
+              </View>
+
+              {/* Event Intel Stats */}
+              <View style={{ backgroundColor: '#1E293B', padding: 15, borderRadius: 8, borderWidth: 1, borderColor: '#334155', marginBottom: 20 }}>
+                  <Text style={{ color: '#F8FAFC', fontFamily: 'Courier', fontSize: 16, marginBottom: 10 }}>Mission: {activeUmpireEvent?.subject}</Text>
+                  <Text style={{ color: '#10B981', fontFamily: 'Courier', fontSize: 14 }}>
+                      Total Intel Secured: {cards.filter(c => c.event_id === activeUmpireEvent?.id).length}
+                  </Text>
+              </View>
+
+              {/* Live Leaderboard */}
+              <Text style={{ color: '#94A3B8', fontFamily: 'Courier', fontWeight: 'bold', marginBottom: 10, letterSpacing: 1 }}>ACTIVE OPERATORS</Text>
+              <FlatList 
+                  data={leaderboard}
+                  keyExtractor={(item) => item.handle}
+                  renderItem={({ item }) => (
+                      <View style={{ flexDirection: 'row', justifyContent: 'space-between', backgroundColor: '#0F172A', padding: 15, borderRadius: 6, marginBottom: 8, borderWidth: 1, borderColor: '#334155' }}>
+                          <Text style={{ color: '#38BDF8', fontWeight: 'bold', fontFamily: 'Courier' }}>{item.handle}</Text>
+                          <View style={{flexDirection: 'row', gap: 15}}>
+                            <Text style={{ color: '#10B981', fontFamily: 'Courier' }}>Intel: {item.authoredCount}</Text>
+                            <Text style={{ color: '#F59E0B', fontFamily: 'Courier' }}>Score: {item.expertiseScore}</Text>
+                          </View>
+                      </View>
+                  )}
+                  ListEmptyComponent={<Text style={{ color: '#64748B', fontFamily: 'Courier', textAlign: 'center', marginTop: 20 }}>Waiting for operator pings...</Text>}
+              />
+          </View>
+      </Modal>
+      <SyncStatusScreen 
+          isVisible={isSyncScreenVisible} 
+          onClose={async () => {
+              setIsSyncScreenVisible(false); // Closes the screen
+              await BluetoothService.stopBroadcasting().catch(() => {}); // Turns off the Beacon
+          }} 
       />
     </SafeAreaView>
   );
@@ -1575,11 +3303,6 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   footTextMain: { color: '#00ff00', fontWeight: 'bold', fontSize: 14 },
-  radarBox: { width: 250, height: 250, borderRadius: 125, borderWidth: 1, borderColor: '#333', position: 'relative', overflow: 'hidden', backgroundColor: '#0a0a0a' },
-  gridLineVertical: { position: 'absolute', top: 0, bottom: 0, left: '50%', width: 1, backgroundColor: '#222' },
-  gridLineHorizontal: { position: 'absolute', left: 0, right: 0, top: '50%', height: 1, backgroundColor: '#222' },
-  gridCenter: { position: 'absolute', top: '50%', left: '50%', marginTop: -10, marginLeft: -10 },
-  radarBlip: { width: 10, height: 10, backgroundColor: 'rgba(0, 255, 0, 0.3)', borderRadius: 5, alignItems: 'center', justifyContent: 'center' },
   tabContainer: { flexDirection: 'row', borderBottomWidth: 1, borderBottomColor: '#333' },
   tab: { flex: 1, padding: 15, alignItems: 'center' },
   activeTab: { borderBottomWidth: 2, borderBottomColor: '#00ff00' },
@@ -1685,5 +3408,58 @@ const styles = StyleSheet.create({
     fontFamily: 'Courier',
     textAlign: 'center',
     marginBottom: 10,
+  },
+  timelineNode: {
+    alignItems: 'center',
+    marginBottom: 16, // Increased spacing between nodes
+    width: '100%',
+  },
+  entryCard: {
+      width: '95%',
+      backgroundColor: '#1E293B', 
+      borderWidth: 1,
+      borderColor: '#475569', // Clear, static border
+      borderRadius: 8,
+      padding: 16,
+      alignItems: 'center', 
+      shadowColor: '#000',
+      shadowOffset: { width: 0, height: 2 },
+      shadowOpacity: 0.3,
+      shadowRadius: 3,
+      elevation: 4,
+  },
+  historyAction: {
+      fontSize: 12,
+      fontWeight: '900',
+      letterSpacing: 1.5,
+      marginBottom: 4,
+      textAlign: 'center',
+  },
+  historyUser: {
+      fontSize: 18,
+      fontWeight: 'bold',
+      color: '#F8FAFC',
+      marginBottom: 12,
+      textAlign: 'center',
+  },
+  keyContainer: {
+      alignItems: 'flex-start', // Left-align content
+      backgroundColor: '#0F172A', 
+      padding: 10,
+      borderRadius: 6,
+      width: '100%',
+      marginBottom: 8,
+  },
+  historyKey: {
+      fontSize: 11,
+      color: '#9CA3AF', 
+      fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+      marginBottom: 2,
+  },
+  historyDate: {
+      fontSize: 10,
+      color: '#64748B', 
+      marginTop: 4,
+      textAlign: 'center',
   },
 });

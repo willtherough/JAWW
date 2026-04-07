@@ -14,6 +14,9 @@ class SourceGattModule(reactContext: ReactApplicationContext) : ReactContextBase
     private var transferCharacteristic: BluetoothGattCharacteristic? = null
     private var startPromise: Promise? = null
 
+    // --- TRACK KNOCKS FOR SECURITY
+    private val requestTimestamps = mutableMapOf<String, Long>()
+
     private val TRANSFER_SERVICE_UUID = UUID.fromString("baba0001-1234-5678-9abc-def012345678")
     private val TRANSFER_CHAR_UUID = UUID.fromString("baba0002-1234-5678-9abc-def012345678")
     
@@ -82,11 +85,21 @@ class SourceGattModule(reactContext: ReactApplicationContext) : ReactContextBase
                         gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
                     }
 
-                    if (characteristic.uuid == TRANSFER_CHAR_UUID) {
+                  if (characteristic.uuid == TRANSFER_CHAR_UUID) {
+                    val currentTime = System.currentTimeMillis()
+                    val lastRequestTime = requestTimestamps[device.address] ?: 0L
+
+                    // ANTI-FUZZING: Only allow 1 knock every 500 milliseconds per device
+                    if (currentTime - lastRequestTime > 500) {
+                        requestTimestamps[device.address] = currentTime
+        
                         val requestString = String(value, Charsets.UTF_8)
                         Log.d("SourceGattModule", ">> SERVER: Received Request: $requestString")
                         sendEvent("onDeviceRequest", requestString)
+                    } else {
+                        Log.w("SourceGattModule", ">> SECURITY: Dropped rapid-fire request from ${device.address}")
                     }
+                }
                 }
                 
                 // --- THE FIX: Allow the client to successfully write to the descriptor ---
