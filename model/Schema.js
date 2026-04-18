@@ -8,20 +8,20 @@ const BANNED_HASHES = [];
 
 // --- 2. TAXONOMY (The "Infinite Filing Cabinet") ---
 export const TAXONOMY_ROOTS = {
-  HUMAN: 'human',   
-  SURVIVAL: 'survival', 
-  TECH: 'tech',     
-  MARKET: 'market', 
-  BEACON: 'beacon'  
+  HUMAN: 'human',
+  SURVIVAL: 'survival',
+  TECH: 'tech',
+  MARKET: 'market',
+  BEACON: 'beacon'
 };
 
 // --- 3. THE INTEREST BOOST (Personalization Algorithm) ---
 export const calculateInterestScore = (card, userInterests = []) => {
   if (!userInterests || userInterests.length === 0) return 1.0;
-  
+
   // MERGE: Added card.path to ensure we catch topics hidden in the file path
   const cardContent = (card.title + " " + (card.topic || "") + " " + (card.path || "") + " " + (card.body || "")).toLowerCase();
-  
+
   let boost = 1.0;
   userInterests.forEach(interest => {
     if (cardContent.includes(interest.toLowerCase())) {
@@ -36,7 +36,7 @@ export const calculateTrustScore = (card, userNetwork = [], userInterests = [], 
   if (card.safety && card.safety.flag_count > 5) return 0;
 
   let score = 0;
-  const validEndorsements = (card.endorsements || []).filter(e => 
+  const validEndorsements = (card.endorsements || []).filter(e =>
     userNetwork.includes(e.author_id)
   );
   score = (validEndorsements.length * 10) + 10;
@@ -58,32 +58,32 @@ export const calculateTrustScore = (card, userNetwork = [], userInterests = [], 
 
 // --- 5. THE LEDGER ENTRY CONSTRUCTOR ---
 export const buildLedgerEntry = ({ action, fromKey, toKey, senderHandle, recipientHandle, signature, timestamp, event, note }) => {
-    if (!action) throw new Error("Incomplete Intel: Missing action type.");
-    if (!fromKey || fromKey === "Unknown") throw new Error("Incomplete Intel: Missing Sender Public Key.");
-    if (toKey === "Unknown") throw new Error("Incomplete Intel: Invalid Recipient Public Key.");
-    if (!timestamp) throw new Error("Incomplete Intel: Missing timestamp.");
-    if (!senderHandle || senderHandle === "Unknown" || senderHandle === "Unknown Operator") throw new Error("Incomplete Intel: Missing or Invalid Sender Handle.");
-    if (recipientHandle === "Unknown" || recipientHandle === "Unknown Operator") throw new Error("Incomplete Intel: Invalid Recipient Handle.");
+  if (!action) throw new Error("Incomplete Intel: Missing action type.");
+  if (!fromKey || fromKey === "Unknown") throw new Error("Incomplete Intel: Missing Sender Public Key.");
+  if (toKey === "Unknown") throw new Error("Incomplete Intel: Invalid Recipient Public Key.");
+  if (!timestamp) throw new Error("Incomplete Intel: Missing timestamp.");
+  if (!senderHandle || senderHandle === "Unknown" || senderHandle === "Unknown Operator") throw new Error("Incomplete Intel: Missing or Invalid Sender Handle.");
+  if (recipientHandle === "Unknown" || recipientHandle === "Unknown Operator") throw new Error("Incomplete Intel: Invalid Recipient Handle.");
 
-    return {
-        action: action,
-        event: event || null,
-        from: fromKey,
-        note: note || null,
-        recipientHandle: recipientHandle || null,
-        senderHandle: senderHandle,
-        signature: signature || null,
-        timestamp: timestamp,
-        to: toKey || null,
-        user: senderHandle
-    };
+  return {
+    action: action,
+    event: event || null,
+    from: fromKey,
+    note: note || null,
+    recipientHandle: recipientHandle || null,
+    senderHandle: senderHandle,
+    signature: signature || null,
+    timestamp: timestamp,
+    to: toKey || null,
+    user: senderHandle
+  };
 };
 
 // --- 6. THE CARD CONSTRUCTOR ---
 export const createCard = async (authorPublicKey, title, body, topicPath, subject, authorHandle, type = 'standard') => {
   if (!authorPublicKey) throw new Error("A cryptographic public key is required to author intel.");
   if (!authorHandle || authorHandle === "Unknown") throw new Error("A permanent handle is required to author intel.");
-  
+
   const timestamp = new Date().toISOString();
   const contentString = title + body;
   const contentHash = await Crypto.digestStringAsync(
@@ -94,13 +94,13 @@ export const createCard = async (authorPublicKey, title, body, topicPath, subjec
   if (BANNED_HASHES.includes(contentHash)) {
     throw new Error("Content flagged as prohibited by safety protocol.");
   }
-  
+
   const genesisBlock = {
     author_id: authorPublicKey,
     author_handle: authorHandle,
     timestamp: timestamp,
-    signature: null, 
-    location_fuzzed: null 
+    signature: null,
+    location_fuzzed: null
   };
 
   // 2. Cryptographically sign the Genesis Block centrally
@@ -111,18 +111,18 @@ export const createCard = async (authorPublicKey, title, body, topicPath, subjec
   return {
     id: Crypto.randomUUID(),
     version: CARD_VERSION,
-    type: type, 
+    type: type,
     title: title,
     body: body,
     topic: topicPath,
     subject: subject || title.substring(0, 16),
-    path: topicPath, 
+    path: topicPath,
     hash: contentHash,
     genesis: genesisBlock, // Now fully signed and secure
     safety: {
-      flag_count: 0, 
+      flag_count: 0,
       last_flagged: null,
-      min_app_version: "1.0" 
+      min_app_version: "1.0"
     },
     history: [
       buildLedgerEntry({
@@ -136,15 +136,16 @@ export const createCard = async (authorPublicKey, title, body, topicPath, subjec
         note: 'Original Entry'
       })
     ],
-    endorsements: [], 
+    endorsements: [],
     commercial: {
       is_for_sale: false,
       price: 0,
-      currency: 'USDC', 
+      currency: 'USDC',
       owner_wallet: null
     },
-    hops: 0,
-    fork_depth: 0 
+    hops: 1,
+    hop_count: 1,
+    fork_depth: 0
   };
 };
 
@@ -152,7 +153,7 @@ export const createCard = async (authorPublicKey, title, body, topicPath, subjec
 export const createIdentityCard = (profile, publicKey) => {
   return {
     type: 'SOURCE_IDENTITY_V1',
-    id: publicKey, 
+    id: publicKey,
     version: CARD_VERSION,
     payload: {
       handle: profile.handle,
@@ -173,41 +174,41 @@ export const createIdentityCard = (profile, publicKey) => {
 
 // --- 8. KNOWLEDGE FORK ---
 export const forkCard = async (originalCard, contextNote, userProfile) => {
-    if (!userProfile.handle || userProfile.handle === "Unknown") throw new Error("A permanent handle is required to fork intel.");
-    // 1. Deep copy the card so we don't accidentally mutate the original in memory
-    const newCard = JSON.parse(JSON.stringify(originalCard));
+  if (!userProfile.handle || userProfile.handle === "Unknown") throw new Error("A permanent handle is required to fork intel.");
+  // 1. Deep copy the card so we don't accidentally mutate the original in memory
+  const newCard = JSON.parse(JSON.stringify(originalCard));
 
-    // 2. WE DO NOT TOUCH newCard.genesis. It belongs to the original author.
-    
-    const timestamp = new Date().toISOString();
-    const safeHistory = newCard.history || [];
+  // 2. WE DO NOT TOUCH newCard.genesis. It belongs to the original author.
 
-    // 3. Find the last valid signature in the chain to maintain unbroken cryptography
-    const lastSignedEntry = [...safeHistory].reverse().find(e => e.signature);
-    const previousSignature = lastSignedEntry ? lastSignedEntry.signature : newCard.genesis.signature;
+  const timestamp = new Date().toISOString();
+  const safeHistory = newCard.history || [];
 
-    // 4. The Operator (Answerer) signs their specific FORK action.
-    const messageToSign = previousSignature + userProfile.publicKey;
-    const newSignature = await signData(messageToSign);
+  // 3. Find the last valid signature in the chain to maintain unbroken cryptography
+  const lastSignedEntry = [...safeHistory].reverse().find(e => e.signature);
+  const previousSignature = lastSignedEntry ? lastSignedEntry.signature : newCard.genesis.signature;
 
-    const forkEntry = buildLedgerEntry({
-        action: 'FORK',
-        fromKey: userProfile.publicKey,
-        toKey: userProfile.publicKey,
-        senderHandle: userProfile.handle,
-        recipientHandle: userProfile.handle,
-        timestamp: timestamp,
-        signature: newSignature,
-        note: contextNote
-    });
+  // 4. The Operator (Answerer) signs their specific FORK action.
+  const messageToSign = previousSignature + userProfile.publicKey;
+  const newSignature = await signData(messageToSign);
 
-    // 5. Append the signed answer to the ledger
-    newCard.history.push(forkEntry);
-    
-    // 6. Update the hop count to reflect the new block
-    newCard.hops = newCard.history.length;
-    newCard.hop_count = newCard.history.length;
-    newCard.fork_depth = (newCard.fork_depth || 0) + 1;
+  const forkEntry = buildLedgerEntry({
+    action: 'FORK',
+    fromKey: userProfile.publicKey,
+    toKey: userProfile.publicKey,
+    senderHandle: userProfile.handle,
+    recipientHandle: userProfile.handle,
+    timestamp: timestamp,
+    signature: newSignature,
+    note: contextNote
+  });
 
-    return newCard;
+  // 5. Append the signed answer to the ledger
+  newCard.history.push(forkEntry);
+
+  // 6. Update the hop count to reflect the new block
+  newCard.hops = newCard.history.length;
+  newCard.hop_count = newCard.history.length;
+  newCard.fork_depth = (newCard.fork_depth || 0) + 1;
+
+  return newCard;
 };

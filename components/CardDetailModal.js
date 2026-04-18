@@ -43,7 +43,7 @@ const ReviewModal = ({ visible, onClose, onBlock, onRequestReview, onFlag }) => 
     );
 };
 
-export default function CardDetailModal({ visible, card, onClose, onFork, onChain, onEnhance, onBlockOperator, currentUserHandle, onRequestReview, onOffer, onMeshSync }) {
+export default function CardDetailModal({ visible, card, onClose, onFork, onChain, onEnhance, onBlockOperator, currentUserHandle, onRequestReview, onOffer, onMeshSync, onAddToGroceryList }) {
   const [isQRVisible, setIsQRVisible] = useState(false);
   const [isTrusted, setIsTrusted] = useState(false);
   const [isReviewModalVisible, setReviewModalVisible] = useState(false);
@@ -102,6 +102,27 @@ export default function CardDetailModal({ visible, card, onClose, onFork, onChai
   const forkNote = card.history?.slice().reverse().find(h => h.action === 'FORKED' || h.action === 'FORK')?.note;
   const author = card.originalAuthor || (card.genesis ? card.genesis.author_id : card.author) || "Unknown";
   const qrPayload = `JAWW:${currentUserHandle}:${card.id}`;
+
+  let isNutritionCard = card.topic === 'nutrition';
+  let isNutrientCard = card.topic === 'nutrient';
+  let nutritionData = null;
+  let nutrientData = null;
+
+  if (isNutritionCard) {
+      try {
+          nutritionData = JSON.parse(card.body);
+      } catch (e) {
+          isNutritionCard = false;
+      }
+  }
+
+  if (isNutrientCard) {
+      try {
+          nutrientData = JSON.parse(card.body);
+      } catch (e) {
+          isNutrientCard = false;
+      }
+  }
 
   const handleBlock = () => {
     onBlockOperator(card);
@@ -174,7 +195,68 @@ export default function CardDetailModal({ visible, card, onClose, onFork, onChai
 
             {/* --- BODY SCROLL --- */}
             <ScrollView style={styles.bodyScroll}>
-                <Text style={styles.cardBody}>{card.body}</Text>
+                {isNutritionCard && nutritionData ? (
+                    <View style={styles.nutritionBox}>
+                        <Text style={styles.nutritionHeader}>NUTRITION FACTS</Text>
+                        <Text style={styles.nutritionUnit}>Amount Per {nutritionData.baseline_unit}</Text>
+                        <View style={styles.nutritionDividerThick} />
+                        <View style={styles.nutritionRow}><Text style={styles.nutritionLabelBold}>Calories</Text><Text style={styles.nutritionValueBold}>{nutritionData.macros?.calories}</Text></View>
+                        <View style={styles.nutritionDividerThick} />
+                        <View style={styles.nutritionRow}><Text style={styles.nutritionLabel}>Protein</Text><Text style={styles.nutritionValue}>{nutritionData.macros?.protein_g}g</Text></View>
+                        <View style={styles.nutritionDivider} />
+                        <View style={styles.nutritionRow}><Text style={styles.nutritionLabel}>Total Fat</Text><Text style={styles.nutritionValue}>{nutritionData.macros?.fat_g}g</Text></View>
+                        <View style={styles.nutritionDivider} />
+                        <View style={styles.nutritionRow}><Text style={styles.nutritionLabel}>Total Carbohydrate</Text><Text style={styles.nutritionValue}>{nutritionData.macros?.carbs_g}g</Text></View>
+                        <View style={styles.nutritionDivider} />
+                        <View style={styles.nutritionRow}><Text style={styles.nutritionLabel}>Sodium</Text><Text style={styles.nutritionValue}>{nutritionData.macros?.sodium_mg}mg</Text></View>
+                        <View style={styles.nutritionDividerThick} />
+                        
+                        {nutritionData.description && <Text style={[styles.cardBody, {marginTop: 15, color: '#000'}]}>{nutritionData.description}</Text>}
+                        {nutritionData.content && !nutritionData.description && <Text style={[styles.cardBody, {marginTop: 15, color: '#000'}]}>{nutritionData.content}</Text>}
+                        
+                        {nutritionData.where_found && (
+                            <>
+                                <Text style={[styles.nutrientSubheader, {marginTop: 15, color: '#64748B'}]}>WHERE IT'S FOUND:</Text>
+                                <Text style={[styles.nutrientListItem, {color: '#334155'}]}>{nutritionData.where_found}</Text>
+                            </>
+                        )}
+                        {nutritionData.benefits && (
+                            <>
+                                <Text style={[styles.nutrientSubheader, {marginTop: 15, color: '#10B981'}]}>BIOLOGICAL BENEFITS:</Text>
+                                <Text style={[styles.nutrientListItem, {color: '#059669'}]}>{nutritionData.benefits}</Text>
+                            </>
+                        )}
+                        {nutritionData.associated_nutrients && (
+                            <>
+                                <Text style={[styles.nutrientSubheader, {marginTop: 15, color: '#38BDF8'}]}>ASSOCIATED NUTRIENTS:</Text>
+                                {nutritionData.associated_nutrients.map((nut, index) => (
+                                    <Text key={index} style={[styles.nutrientListItem, {color: '#0284C7'}]}>• {nut}</Text>
+                                ))}
+                            </>
+                        )}
+                    </View>
+                ) : isNutrientCard && nutrientData ? (
+                    <View style={styles.nutrientBox}>
+                        <Text style={styles.nutrientHeader}>BIOLOGICAL NUTRIENT</Text>
+                        <View style={styles.nutritionDividerThick} />
+                        <Text style={[styles.cardBody, {marginTop: 10, marginBottom: 20}]}>{nutrientData.content}</Text>
+                        
+                        <Text style={styles.nutrientSubheader}>RECOMMENDED DAILY VALUE:</Text>
+                        <Text style={styles.nutrientValue}>{nutrientData.recommended_daily_value}</Text>
+                        
+                        <Text style={[styles.nutrientSubheader, {marginTop: 15}]}>COMMON SOURCES:</Text>
+                        {nutrientData.common_sources?.map((source, index) => (
+                            <Text key={index} style={styles.nutrientListItem}>• {source}</Text>
+                        ))}
+                        
+                        <Text style={[styles.nutrientSubheader, {marginTop: 15, color: '#EF4444'}]}>DEFICIENCY SYMPTOMS:</Text>
+                        {nutrientData.deficiency_symptoms?.map((symptom, index) => (
+                            <Text key={index} style={[styles.nutrientListItem, {color: '#FCA5A5'}]}>• {symptom}</Text>
+                        ))}
+                    </View>
+                ) : (
+                    <Text style={styles.cardBody}>{card.body}</Text>
+                )}
                 
                 {forkNote && !isSystemCard && (
                     <View style={styles.noteBox}>
@@ -235,6 +317,12 @@ export default function CardDetailModal({ visible, card, onClose, onFork, onChai
                                 </Text>
                             </TouchableOpacity>
                         </View>
+                        {isNutritionCard && onAddToGroceryList && (
+                            <TouchableOpacity onPress={() => onAddToGroceryList(card)} style={[styles.btnEnhance, { marginTop: 12, backgroundColor: '#0F172A', borderColor: '#38BDF8' }]}>
+                                <Feather name="shopping-cart" size={16} color="#38BDF8" />
+                                <Text style={[styles.btnEnhanceText, { color: '#38BDF8' }]}>ADD TO GROCERY LIST</Text>
+                            </TouchableOpacity>
+                        )}
 
                         {author !== currentUserHandle && (
                             <TouchableOpacity onPress={() => setReviewModalVisible(true)} style={styles.btnReview}>
@@ -288,11 +376,114 @@ const styles = StyleSheet.create({
   btnActionGreen: { flex: 1, flexDirection: 'row', borderWidth: 1, borderColor: '#10B981', backgroundColor: 'rgba(16, 185, 129, 0.1)', padding: 14, borderRadius: 6, alignItems: 'center', justifyContent: 'center', gap: 6 },
   btnActionTextGreen: { color: '#10B981', fontWeight: 'bold', fontFamily: 'Courier', fontSize: 14 },
   btnActionActive: { flex: 1, flexDirection: 'row', borderWidth: 1, borderColor: '#F8FAFC', backgroundColor: '#334155', padding: 14, borderRadius: 6, alignItems: 'center', justifyContent: 'center', gap: 6 },
-  btnActionTextActive: { color: '#F8FAFC', fontWeight: 'bold', fontFamily: 'Courier', fontSize: 14 },
+  btnActionTextActive: {
+    color: '#F8FAFC',
+    fontWeight: 'bold',
+    fontFamily: 'Courier',
+    fontSize: 10
+  },
+  // --- NUTRITION FACTS UI ---
+  nutritionBox: {
+    backgroundColor: '#fff',
+    padding: 15,
+    borderRadius: 8,
+    borderWidth: 2,
+    borderColor: '#000',
+    marginBottom: 20,
+  },
+  nutritionHeader: {
+    fontFamily: 'Courier',
+    fontWeight: '900',
+    fontSize: 32,
+    color: '#000',
+    marginBottom: 4,
+  },
+  nutritionUnit: {
+    fontFamily: 'Courier',
+    fontSize: 14,
+    color: '#333',
+    fontWeight: 'bold',
+    marginBottom: 8,
+  },
+  nutritionDivider: {
+    height: 1,
+    backgroundColor: '#000',
+    marginVertical: 4,
+  },
+  nutritionDividerThick: {
+    height: 8,
+    backgroundColor: '#000',
+    marginVertical: 6,
+  },
+  nutritionRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingVertical: 2,
+  },
+  nutritionLabel: {
+    fontFamily: 'Courier',
+    fontSize: 14,
+    color: '#000',
+  },
+  nutritionLabelBold: {
+    fontFamily: 'Courier',
+    fontSize: 14,
+    color: '#000',
+    fontWeight: 'bold',
+  },
+  nutritionValue: {
+    fontFamily: 'Courier',
+    fontSize: 14,
+    color: '#000',
+  },
+  nutritionValueBold: {
+    fontFamily: 'Courier',
+    fontSize: 14,
+    color: '#000',
+    fontWeight: 'bold',
+  },
+  // --- NUTRIENT CARD UI ---
+  nutrientBox: {
+    backgroundColor: '#0F172A',
+    padding: 15,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#38BDF8',
+    marginBottom: 20,
+  },
+  nutrientHeader: {
+    fontFamily: 'Courier',
+    fontWeight: 'bold',
+    fontSize: 20,
+    color: '#38BDF8',
+    marginBottom: 4,
+  },
+  nutrientSubheader: {
+    fontFamily: 'Courier',
+    fontSize: 12,
+    color: '#94A3B8',
+    fontWeight: 'bold',
+    letterSpacing: 1,
+    marginBottom: 4,
+  },
+  nutrientValue: {
+    fontFamily: 'Courier',
+    fontSize: 16,
+    color: '#F8FAFC',
+    fontWeight: 'bold',
+    marginBottom: 8,
+  },
+  nutrientListItem: {
+    fontFamily: 'Courier',
+    fontSize: 14,
+    color: '#E2E8F0',
+    marginBottom: 4,
+    paddingLeft: 8,
+  },
   btnReview: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', marginTop: 12, padding: 12, borderWidth: 1, borderColor: '#334155', borderRadius: 6, gap: 8 },
   btnReviewText: { color: '#94A3B8', fontWeight: 'bold', fontFamily: 'Courier', fontSize: 12, letterSpacing: 1 },
   btnEnhance: { flexDirection: 'row', backgroundColor: '#022C22', paddingVertical: 16, borderRadius: 6, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#10B981', width: '100%', gap: 8 },
-  btnEnhanceText: { color: '#10B981', fontSize: 14, fontWeight: 'bold', fontFamily: 'Courier', letterSpacing: 1 },
+  btnEnhanceText: { color: '#10B981', fontWeight: 'bold', fontFamily: 'Courier', fontSize: 14 },
   btnCancel: { marginTop: 16, padding: 12, alignItems: 'center' },
   btnTextGray: { color: '#94A3B8', fontFamily: 'Courier', fontSize: 13, fontWeight: 'bold', letterSpacing: 1 },
   

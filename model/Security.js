@@ -1,7 +1,14 @@
+import 'react-native-get-random-values';
 import * as SecureStore from 'expo-secure-store';
 import * as Crypto from 'expo-crypto';
 import nacl from 'tweetnacl';
 import util from 'tweetnacl-util';
+import * as bip39 from 'bip39';
+import { Buffer } from 'buffer';
+
+if (typeof global.Buffer === 'undefined') {
+  global.Buffer = Buffer;
+}
 
 // The key used to lock the data in the Android/iOS KeyStore
 const KEY_TAG = 'source_user_identity_v1';
@@ -12,6 +19,36 @@ const deterministicStringify = (obj) => {
         sortedObj[key] = obj[key];
     });
     return JSON.stringify(sortedObj);
+};
+
+export const generateMnemonicWordList = () => {
+    return bip39.generateMnemonic(); // Generates 12 words string
+};
+
+export const deriveKeysFromMnemonic = async (phrase) => {
+    try {
+        // 1. Convert the 12 words into a 64-byte deterministic Buffer using PBKDF2
+        const seedBuffer = bip39.mnemonicToSeedSync(phrase.trim().toLowerCase());
+        
+        // 2. TweetNaCl requires exactly 32 bytes for an ed25519 seed. 
+        // The first 32 bytes of the PBKDF2 derived seed provide cryptographically secure entropy.
+        const seed32 = new Uint8Array(seedBuffer.slice(0, 32));
+        
+        // 3. Generate the Keys
+        const keyPair = nacl.sign.keyPair.fromSeed(seed32);
+        
+        const publicKey = util.encodeBase64(keyPair.publicKey);
+        const secretKey = util.encodeBase64(keyPair.secretKey);
+        
+        const newKeys = { publicKey, secretKey };
+        await SecureStore.setItemAsync(KEY_TAG, JSON.stringify(newKeys));
+        console.log("✅ SECURITY: New Mnemonic Identity Secured in Hardware Enclave.");
+        
+        return newKeys;
+    } catch (error) {
+        console.error("❌ Mnemonic Derivation Error:", error);
+        return null;
+    }
 };
 
 // 1. GENERATE OR RETRIEVE IDENTITY (The Vault)
@@ -25,25 +62,8 @@ export const getOrGenerateKeys = async () => {
       console.log("🔐 SECURITY: Existing Identity Loaded.");
       return keys; // Returns { publicKey, secretKey }
     } else {
-      console.log("⚔️ SECURITY: No keys found. Generating new Identity...");
-      
-      // B. THE PRNG FIX (Your code)
-      // Ask the phone hardware for 32 bytes of true randomness
-      const seed = await Crypto.getRandomBytesAsync(32);
-      
-      // Use those bytes to build the keys
-      const keyPair = nacl.sign.keyPair.fromSeed(seed);
-      
-      const publicKey = util.encodeBase64(keyPair.publicKey);
-      const secretKey = util.encodeBase64(keyPair.secretKey);
-      
-      const newKeys = { publicKey, secretKey };
-      
-      // C. Save to Hardware Store
-      await SecureStore.setItemAsync(KEY_TAG, JSON.stringify(newKeys));
-      console.log("✅ SECURITY: New Identity Secured in Hardware Enclave.");
-      
-      return newKeys;
+      console.log("⚔️ SECURITY: No keys found. Bubbling to UI...");
+      return null;
     }
   } catch (error) {
     console.error("❌ SECURITY CRITICAL ERROR:", error);
@@ -83,6 +103,8 @@ export const signData = async (dataInput) => {
 
 // 3. VERIFY SIGNATURE (The Auditor)
 export const verifySignature = (dataInput, signature, authorPublicKey) => {
+  if (authorPublicKey === 'SYSTEM') return true; // System cards are bundled, not signed
+
   try {
     const messageString = typeof dataInput === 'string' 
       ? dataInput 
@@ -101,6 +123,8 @@ export const verifySignature = (dataInput, signature, authorPublicKey) => {
 
 // 4. VERIFY ENTIRE CHAIN (The "Lean Chain" Auditor)
 export const verifyChain = (card) => {
+  if (card?.genesis?.author_id === 'SYSTEM') return true; // Bypass for bundled DB seeds
+
   if (!card || !card.genesis || !card.genesis.signature || !card.genesis.author_id) {
     console.error("Chain Verification Aborted: Invalid Genesis Block.");
     return false;

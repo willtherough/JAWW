@@ -12,14 +12,17 @@ import {
   ActivityIndicator,
   Alert
 } from 'react-native';
+import { Feather } from '@expo/vector-icons';
 import SearchBar from './SearchBar';
 import { getAllEvents, getCardsByEvent, deleteEvent } from '../model/database';
+import { calculateBioBaseline, aggregateListMacros } from '../utils/NutritionMath';
 
-export default function OracleModal({ visible, onClose, masterLibrary = [], funLibrary = [], onSelect, onNavigate, onEndEvent, refreshTrigger }) {
+export default function OracleModal({ visible, onClose, masterLibrary = [], funLibrary = [], groceryList = [], onSelect, onNavigate, onEndEvent, refreshTrigger }) {
   const [query, setQuery] = useState('');
   
   // --- NEW: EVENT STATE ---
-    const [activeTab, setActiveTab] = useState('TOPICS'); // 'TOPICS' or 'ASSEMBLY'
+    const [activeTab, setActiveTab] = useState('VAULT'); // 'VAULT', 'FRIDGE', 'GROCERY_LIST', 'ASSEMBLY'
+  const [activeVaultMenu, setActiveVaultMenu] = useState(null); // 'CORE', 'FUN', or 'NUTRITION'
   const [events, setEvents] = useState([]);
   const [activeEventCards, setActiveEventCards] = useState(null); // Null = not looking at an event
   const [activeEventId, setActiveEventId] = useState(null); // Keep track of the active event ID
@@ -36,7 +39,32 @@ export default function OracleModal({ visible, onClose, masterLibrary = [], funL
     'NBA', 'MLB', 'NHL', 'UFC', 'RACING', 'NASCAR', 'LE MANS'
   ];
 
+  const NUTRITION_TAGS = [
+    'FOOD', 'NUTRIENTS', 'MACROS', 'VITAMINS', 'MINERALS'
+  ];
+
   const library = [...masterLibrary, ...funLibrary];
+
+  // --- PHASE 5: FRIDGE STATE ---
+  const fridgeItems = useMemo(() => {
+    return library.filter(c => c.subject && c.subject.startsWith('PURCHASE:'));
+  }, [library]);
+
+  const handleCheckPrices = () => {
+    Alert.alert(
+        "Mesh Price Analysis",
+        "Scanning the local mesh for community purchase histories...\n\nRESULTS:\n- Walnuts: You paid $8.99 at Harris Teeter. Another user paid $7.50 at the Commissary (1.2 miles away).",
+        [{ text: "Acknowledge", style: "cancel" }]
+    );
+  };
+
+  // --- PHASE 5: NUTRITION ARBITRAGE MATH ---
+  // Hardcoded for MVP stress test. In production, this pulls from User Profile.
+  const bioTargets = useMemo(() => calculateBioBaseline(85, 180, 30, 'M', 1.725), []);
+  const listTotals = useMemo(() => aggregateListMacros(groceryList), [groceryList]);
+
+  const hasProteinDeficit = listTotals.protein_g < bioTargets.protein_g;
+  const hasSodiumSurplus = listTotals.sodium_mg > bioTargets.sodium_mg;
 
   // --- NEW: FETCH EVENTS ON MOUNT ---
   useEffect(() => {
@@ -47,7 +75,7 @@ export default function OracleModal({ visible, onClose, masterLibrary = [], funL
       setActiveEventCards(null);
       setActiveEventId(null); // Reset active event ID
       setQuery('');
-      setActiveTab('TOPICS');
+      setActiveTab('VAULT');
     }
   }, [visible]);
 
@@ -107,18 +135,35 @@ export default function OracleModal({ visible, onClose, masterLibrary = [], funL
     if (!q) return [];
 
     const source = MASTER_TAGS.map(t => t.toLowerCase()).includes(q) 
-        ? masterLibrary 
+        ? masterLibrary.filter(c => c.topic !== 'nutrition' && c.topic !== 'nutrient') 
         : FUN_TAGS.map(t => t.toLowerCase()).includes(q)
             ? funLibrary
-            : library;
+            : NUTRITION_TAGS.map(t => t.toLowerCase()).includes(q)
+                ? library.filter(c => c.topic === 'nutrition' || c.topic === 'nutrient')
+                : library;
 
-    return source.filter(card => 
-        card.title.toLowerCase().includes(q) || 
-        (card.category && card.category.toLowerCase().includes(q)) ||
+    // Handle Macro Queries from the giant buttons
+    if (q === '#core') {
+      return masterLibrary.filter(c => c.topic !== 'nutrition' && c.topic !== 'nutrient');
+    }
+    if (q === '#fun') {
+      return funLibrary;
+    }
+    if (q === '#nutrition') {
+      return library.filter(c => c.topic === 'nutrition' || c.topic === 'nutrient');
+    }
+
+    return source.filter(card => {
+        if (activeTab === 'GROCERY_LIST' && card.topic !== 'nutrition' && card.topic !== 'nutrient') return false;
+
+        const isMatch = card.title.toLowerCase().includes(q) || 
+        (card.topic && card.topic.toLowerCase().includes(q)) ||
         (card.tags && card.tags.some(t => t.toLowerCase().includes(q))) ||
-        (card.keywords && card.keywords.some(k => k.toLowerCase().includes(q)))
-    );
-  }, [library, query, masterLibrary, funLibrary, activeEventCards]);
+        (card.keywords && card.keywords.some(k => k.toLowerCase().includes(q)));
+        
+        return isMatch;
+    });
+  }, [library, query, masterLibrary, funLibrary, activeEventCards, activeTab]);
 
 
   // --- RENDER ITEMS ---
@@ -217,10 +262,22 @@ export default function OracleModal({ visible, onClose, masterLibrary = [], funL
                     {/* Tab Navigation */}
                     <View style={styles.tabContainer}>
                         <TouchableOpacity 
-                            style={[styles.tabBtn, activeTab === 'TOPICS' && styles.activeTabBtn]}
-                            onPress={() => setActiveTab('TOPICS')}
+                            style={[styles.tabBtn, activeTab === 'VAULT' && styles.activeTabBtn]}
+                            onPress={() => setActiveTab('VAULT')}
                         >
-                            <Text style={[styles.tabText, activeTab === 'TOPICS' && styles.activeTabText]}>GLOBAL TOPICS</Text>
+                            <Text style={[styles.tabText, activeTab === 'VAULT' && styles.activeTabText]}>VAULT</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity 
+                            style={[styles.tabBtn, activeTab === 'FRIDGE' && styles.activeTabBtn]}
+                            onPress={() => setActiveTab('FRIDGE')}
+                        >
+                            <Text style={[styles.tabText, activeTab === 'FRIDGE' && styles.activeTabText]}>FRIDGE</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity 
+                            style={[styles.tabBtn, activeTab === 'GROCERY_LIST' && styles.activeTabBtn]}
+                            onPress={() => setActiveTab('GROCERY_LIST')}
+                        >
+                            <Text style={[styles.tabText, activeTab === 'GROCERY_LIST' && styles.activeTabText]}>GROCERY</Text>
                         </TouchableOpacity>
                         <TouchableOpacity 
                             style={[styles.tabBtn, activeTab === 'ASSEMBLY' && styles.activeTabBtn]}
@@ -230,38 +287,196 @@ export default function OracleModal({ visible, onClose, masterLibrary = [], funL
                         </TouchableOpacity>
                     </View>
 
-                    {activeTab === 'TOPICS' ? (
+                    {activeTab === 'VAULT' ? (
                         <View style={styles.emptyState}>
-                            <Text style={styles.sectionTitle}>// CORE KNOWLEDGE</Text>
-                            <View style={styles.tagCloud}>
-                                {MASTER_TAGS.map(tag => (
-                                    <TouchableOpacity 
-                                        key={tag} 
-                                        style={styles.tagPill}
-                                        onPress={() => setQuery(tag)}
-                                    >
-                                        <Text style={styles.tagText}>{tag}</Text>
+                            {activeVaultMenu === null ? (
+                                <>
+                                    <TouchableOpacity style={styles.macroBtn} onPress={() => setActiveVaultMenu('CORE')}>
+                                        <Feather name="database" size={24} color="#00ffff" style={{ marginBottom: 8 }} />
+                                        <Text style={styles.macroBtnText}>CORE KNOWLEDGE</Text>
+                                        <Text style={styles.macroBtnSub}>{masterLibrary.filter(c => c.topic !== 'nutrition' && c.topic !== 'nutrient').length} Nodes Available</Text>
                                     </TouchableOpacity>
-                                ))}
+
+                                    <TouchableOpacity style={[styles.macroBtn, { borderColor: '#33ff00' }]} onPress={() => setActiveVaultMenu('FUN')}>
+                                        <Feather name="play-circle" size={24} color="#33ff00" style={{ marginBottom: 8 }} />
+                                        <Text style={[styles.macroBtnText, { color: '#33ff00' }]}>RECREATIONAL & SPECIAL INTEREST</Text>
+                                        <Text style={styles.macroBtnSub}>{funLibrary.length} Nodes Available</Text>
+                                    </TouchableOpacity>
+
+                                    <TouchableOpacity style={[styles.macroBtn, { borderColor: '#F59E0B' }]} onPress={() => setActiveVaultMenu('NUTRITION')}>
+                                        <Feather name="activity" size={24} color="#F59E0B" style={{ marginBottom: 8 }} />
+                                        <Text style={[styles.macroBtnText, { color: '#F59E0B' }]}>BIOLOGICAL NUTRITION</Text>
+                                        <Text style={styles.macroBtnSub}>{library.filter(c => c.topic === 'nutrition' || c.topic === 'nutrient').length} Nodes Available</Text>
+                                    </TouchableOpacity>
+                                </>
+                            ) : (
+                                <View style={{ width: '100%', alignItems: 'center' }}>
+                                    <TouchableOpacity style={styles.backBtn} onPress={() => setActiveVaultMenu(null)}>
+                                        <Feather name="chevron-left" size={16} color="#94A3B8" />
+                                        <Text style={styles.backBtnText}>BACK TO MENUS</Text>
+                                    </TouchableOpacity>
+
+                                    {activeVaultMenu === 'CORE' && (
+                                        <>
+                                            <Text style={styles.sectionTitle}>// CORE KNOWLEDGE</Text>
+                                            <View style={styles.tagCloud}>
+                                                {MASTER_TAGS.map(tag => (
+                                                    <TouchableOpacity key={tag} style={styles.tagPill} onPress={() => setQuery(tag)}>
+                                                        <Text style={styles.tagText}>{tag}</Text>
+                                                    </TouchableOpacity>
+                                                ))}
+                                            </View>
+                                        </>
+                                    )}
+
+                                    {activeVaultMenu === 'FUN' && (
+                                        <>
+                                            <Text style={styles.sectionTitle}>// RECREATIONAL & SPECIAL INTEREST</Text>
+                                            <View style={styles.tagCloud}>
+                                                {FUN_TAGS.map(tag => (
+                                                    <TouchableOpacity key={tag} style={[styles.tagPill, { borderColor: '#33ff00' }]} onPress={() => setQuery(tag)}>
+                                                        <Text style={[styles.tagText, { color: '#33ff00' }]}>{tag}</Text>
+                                                    </TouchableOpacity>
+                                                ))}
+                                            </View>
+                                        </>
+                                    )}
+
+                                    {activeVaultMenu === 'NUTRITION' && (
+                                        <>
+                                            <Text style={styles.sectionTitle}>// BIOLOGICAL NUTRITION</Text>
+                                            <View style={styles.tagCloud}>
+                                                {NUTRITION_TAGS.map(tag => (
+                                                    <TouchableOpacity key={tag} style={[styles.tagPill, { borderColor: '#F59E0B' }]} onPress={() => setQuery(tag)}>
+                                                        <Text style={[styles.tagText, { color: '#F59E0B' }]}>{tag}</Text>
+                                                    </TouchableOpacity>
+                                                ))}
+                                            </View>
+                                        </>
+                                    )}
+                                </View>
+                            )}
+                        </View>
+                    ) : activeTab === 'FRIDGE' ? (
+                        <View style={{ flex: 1 }}>
+                            <Text style={styles.sectionTitle}>// INVENTORY & PURCHASES</Text>
+                            
+                            <FlatList 
+                                data={fridgeItems}
+                                keyExtractor={item => item.id}
+                                renderItem={({ item }) => {
+                                    let details = { store: 'Unknown', price: 0, date: '' };
+                                    try { details = JSON.parse(item.body); } catch(e) {}
+                                    
+                                    return (
+                                        <View style={styles.resultItem}>
+                                            <View style={styles.resultHeader}>
+                                                <Text style={styles.resultTitle}>{item.title}</Text>
+                                                <Text style={styles.resultCategory}>${details.price} @ {details.store}</Text>
+                                            </View>
+                                            <Text style={styles.resultPreview}>{new Date(details.date || item.timestamp).toLocaleDateString()}</Text>
+                                        </View>
+                                    );
+                                }}
+                                contentContainerStyle={{ paddingBottom: 20 }}
+                                ListEmptyComponent={
+                                    <View style={styles.emptyState}>
+                                        <Text style={styles.emptyText}>No receipt purchases found in your Fridge.</Text>
+                                    </View>
+                                }
+                            />
+
+                            <View style={{ flexDirection: 'row', gap: 10, marginTop: 10 }}>
+                                <TouchableOpacity style={[styles.footBtnMain, { flex: 1 }]} onPress={() => onNavigate('scan_receipt')}>
+                                    <Text style={styles.footTextMain}>SCAN RECEIPT</Text>
+                                </TouchableOpacity>
+                                {fridgeItems.length > 0 && (
+                                    <TouchableOpacity style={[styles.footBtnMain, { flex: 1, borderColor: '#38BDF8', backgroundColor: '#001' }]} onPress={handleCheckPrices}>
+                                        <Text style={[styles.footTextMain, { color: '#38BDF8' }]}>CHECK LOCAL PRICES</Text>
+                                    </TouchableOpacity>
+                                )}
+                            </View>
+                        </View>
+                    ) : activeTab === 'GROCERY_LIST' ? (
+                        <View style={{ flex: 1 }}>
+                            <Text style={styles.sectionTitle}>// BIOLOGICAL RADAR</Text>
+                            
+                            {/* Deficit/Surplus Engine */}
+                            <View style={styles.radarMetrics}>
+                                <View style={styles.metricRow}>
+                                    <Text style={styles.metricLabel}>PROTEIN (Target: {bioTargets.protein_g}g)</Text>
+                                    <Text style={[styles.metricValue, { color: hasProteinDeficit ? '#EF4444' : '#10B981' }]}>
+                                        {listTotals.protein_g}g [{hasProteinDeficit ? 'DEFICIT' : 'OPTIMAL'}]
+                                    </Text>
+                                </View>
+                                <View style={styles.metricRow}>
+                                    <Text style={styles.metricLabel}>SODIUM (Limit: {bioTargets.sodium_mg}mg)</Text>
+                                    <Text style={[styles.metricValue, { color: hasSodiumSurplus ? '#F59E0B' : '#10B981' }]}>
+                                        {listTotals.sodium_mg}mg [{hasSodiumSurplus ? 'WARNING' : 'OPTIMAL'}]
+                                    </Text>
+                                </View>
+                                <View style={styles.metricRow}>
+                                    <Text style={styles.metricLabel}>CALORIES (TDEE: {bioTargets.tdee_kcal})</Text>
+                                    <Text style={[styles.metricValue, { color: '#00ffff' }]}>{listTotals.calories} kcal</Text>
+                                </View>
                             </View>
 
-                            <View style={{ height: 24 }} />
-
-                            <Text style={styles.sectionTitle}>// RECREATIONAL & SPECIAL INTEREST</Text>
-                            <View style={styles.tagCloud}>
-                                {FUN_TAGS.map(tag => (
-                                    <TouchableOpacity 
-                                        key={tag} 
-                                        style={[styles.tagPill, { borderColor: '#33ff00' }]}
-                                        onPress={() => setQuery(tag)} 
-                                    >
-                                        <Text style={[styles.tagText, { color: '#33ff00' }]}>{tag}</Text>
+                            {/* The Arbitrage Engine Swap Alert (Triggered by MVP mock data for stress test) */}
+                            {hasProteinDeficit && (
+                                <View style={styles.arbitrageAlert}>
+                                    <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 6 }}>
+                                        <Feather name="trending-down" size={16} color="#F59E0B" />
+                                        <Text style={styles.arbitrageTitle}>ARBITRAGE OPPORTUNITY DETECTED</Text>
+                                    </View>
+                                    <Text style={styles.arbitrageText}>
+                                        Alert: Protein deficit detected. Your standard Brisket is $0.09/gram locally. 
+                                        The Mesh indicates Chicken Breast is available at Aldi for $0.03/gram. 
+                                    </Text>
+                                    <TouchableOpacity style={styles.btnSwap} onPress={() => Alert.alert("Swap Executed", "Chicken Breast added to list.")}>
+                                        <Text style={styles.btnSwapText}>TAP TO SUBSTITUTE</Text>
                                     </TouchableOpacity>
-                                ))}
+                                </View>
+                            )}
+
+                            <Text style={[styles.sectionTitle, { marginTop: 20 }]}>// NUTRITION MASTER LIBRARY</Text>
+                            <View style={[styles.searchContainer, { borderBottomWidth: 0, paddingHorizontal: 0, paddingVertical: 10 }]}>
+                                <SearchBar 
+                                    value={query}
+                                    onChangeText={setQuery}
+                                    onClear={() => setQuery('')}
+                                    placeholder="Search Nutrition Database..."
+                                />
                             </View>
-                            <Text style={styles.statsText}>
-                                CORE NODES: {masterLibrary.length} | FUN NODES: {funLibrary.length}
-                            </Text>
+
+                            <FlatList
+                                data={query.trim() !== '' ? results : masterLibrary.filter(c => c.topic === 'nutrition')}
+                                keyExtractor={item => item.id}
+                                renderItem={({ item }) => (
+                                    <TouchableOpacity style={styles.resultItem} onPress={() => onSelect(item)}>
+                                        <View style={styles.resultHeader}>
+                                            <Text style={styles.resultTitle}>{item.title}</Text>
+                                            <Text style={[styles.resultCategory, { color: '#F59E0B' }]}>NUTRITION</Text>
+                                        </View>
+                                    </TouchableOpacity>
+                                )}
+                                ListEmptyComponent={
+                                    <Text style={styles.emptyText}>No nutrition cards found.</Text>
+                                }
+                            />
+
+                            <Text style={[styles.sectionTitle, { marginTop: 20 }]}>// CURRENT RADAR ITEMS</Text>
+                            <FlatList
+                                data={groceryList}
+                                keyExtractor={(item, idx) => item.id + idx}
+                                renderItem={({ item }) => (
+                                    <View style={[styles.resultItem, { borderColor: '#10B981' }]}>
+                                        <Text style={styles.resultTitle}>{item.title}</Text>
+                                    </View>
+                                )}
+                                ListEmptyComponent={
+                                    <Text style={styles.emptyText}>Your grocery list is empty.</Text>
+                                }
+                            />
                         </View>
                     ) : (
                         <FlatList 
@@ -415,6 +630,32 @@ const styles = StyleSheet.create({
     fontFamily: 'Courier',
     marginTop: 4,
   },
+  statLabel: { color: '#888', fontSize: 10, fontFamily: 'Courier', textAlign: 'center' },
+  statValue: { color: '#00ff00', fontSize: 16, fontFamily: 'Courier', fontWeight: 'bold', textAlign: 'center' },
+  macroBtn: {
+    width: '100%',
+    paddingVertical: 30,
+    paddingHorizontal: 20,
+    backgroundColor: '#0a0a0a',
+    borderWidth: 1,
+    borderColor: '#00ffff',
+    borderRadius: 8,
+    alignItems: 'center',
+    marginBottom: 20,
+  },
+  macroBtnText: {
+    color: '#00ffff',
+    fontFamily: 'Courier',
+    fontWeight: 'bold',
+    fontSize: 18,
+    textAlign: 'center',
+  },
+  macroBtnSub: {
+    color: '#666',
+    fontFamily: 'Courier',
+    fontSize: 12,
+    marginTop: 8,
+  },
   emptyText: {
     color: '#666',
     fontFamily: 'Courier',
@@ -431,12 +672,7 @@ const styles = StyleSheet.create({
     marginBottom: 20,
     fontSize: 12,
   },
-  tagCloud: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    justifyContent: 'center',
-    gap: 10,
-  },
+  tagCloud: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, justifyContent: 'center' },
   tagPill: {
     backgroundColor: '#002222',
     paddingVertical: 8,
@@ -450,6 +686,25 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontFamily: 'Courier',
     fontWeight: 'bold',
+  },
+  backBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    marginBottom: 20,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#334155',
+    backgroundColor: '#0F172A',
+  },
+  backBtnText: {
+    color: '#94A3B8',
+    fontFamily: 'Courier',
+    fontSize: 12,
+    fontWeight: 'bold',
+    marginLeft: 6,
   },
   statsText: {
     color: '#333',
@@ -488,10 +743,65 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#00ff00',
   },
-  footTextMain: { 
-    color: '#00ff00', 
-    fontWeight: 'bold', 
-    fontSize: 12, 
-    fontFamily: 'Courier' 
+  footTextMain: { color: '#00ff00', fontWeight: 'bold', fontSize: 14, fontFamily: 'Courier' },
+  // --- RADAR UI ---
+  radarMetrics: {
+    backgroundColor: '#111',
+    padding: 15,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#333',
+    marginBottom: 20
   },
+  metricRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 10
+  },
+  metricLabel: {
+    color: '#888',
+    fontFamily: 'Courier',
+    fontSize: 12
+  },
+  metricValue: {
+    fontFamily: 'Courier',
+    fontSize: 12,
+    fontWeight: 'bold'
+  },
+  arbitrageAlert: {
+    backgroundColor: 'rgba(245, 158, 11, 0.1)',
+    borderWidth: 1,
+    borderColor: '#F59E0B',
+    borderRadius: 8,
+    padding: 15,
+    marginBottom: 20
+  },
+  arbitrageTitle: {
+    color: '#F59E0B',
+    fontFamily: 'Courier',
+    fontWeight: 'bold',
+    fontSize: 12,
+    marginLeft: 8
+  },
+  arbitrageText: {
+    color: '#CBD5E1',
+    fontFamily: 'Courier',
+    fontSize: 12,
+    lineHeight: 18,
+    marginBottom: 12
+  },
+  btnSwap: {
+    backgroundColor: 'rgba(245, 158, 11, 0.2)',
+    paddingVertical: 10,
+    borderRadius: 4,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#F59E0B'
+  },
+  btnSwapText: {
+    color: '#F59E0B',
+    fontFamily: 'Courier',
+    fontWeight: 'bold',
+    fontSize: 12
+  }
 });

@@ -37,10 +37,10 @@ export const calculateDepthScore = (history) => {
     } else if (entry.action === 'TRANSFER' || entry.action === 'SHARED' || entry.action === 'RECEIVED') {
       const from = entry.from;
       const to = entry.user || entry.to; // Handle different key names for recipient
-      
+
       // The first sender is the author if CREATED action is missing
       if (!author && from) {
-          author = from;
+        author = from;
       }
 
       if (from && to) {
@@ -152,7 +152,7 @@ export const initDB = async () => {
         await db.execAsync(`ALTER TABLE events ADD COLUMN is_umpire INTEGER DEFAULT 0;`);
         console.log(">> MIGRATION: Added is_umpire to events table");
       } catch (e) { /* Silently ignore */ }
-      
+
       // 6. Add lineage columns for variants
       try {
         await db.execAsync(`ALTER TABLE cards ADD COLUMN parent_id TEXT;`);
@@ -162,7 +162,7 @@ export const initDB = async () => {
         await db.execAsync(`ALTER TABLE cards ADD COLUMN parent_hash TEXT;`);
         console.log(">> MIGRATION: Added parent_hash to cards");
       } catch (e) { /* Silently ignore */ }
-      
+
       // 7. Add depth_score for robust DAG-based reputation
       try {
         await db.execAsync(`ALTER TABLE cards ADD COLUMN depth_score INTEGER DEFAULT 0;`);
@@ -202,7 +202,7 @@ export const initDB = async () => {
 
     // 4. Re-create FTS from a clean slate
     await db.execAsync("CREATE VIRTUAL TABLE fts_cards USING fts5(title, body, topic, subject, content='cards');");
-    
+
     // Drop all possible old triggers before creating new ones
     await db.execAsync(`
         DROP TRIGGER IF EXISTS cards_after_insert;
@@ -219,12 +219,12 @@ export const initDB = async () => {
 
     // 5. Re-index and audit
     await db.execAsync("INSERT INTO fts_cards(fts_cards) VALUES('rebuild');");
-    
+
     const cardsCountResult = await db.getFirstAsync('SELECT COUNT(*) as count FROM cards');
     const cardsCount = cardsCountResult ? cardsCountResult.count : 0;
     const ftsCountResult = await db.getFirstAsync('SELECT count(*) as count FROM fts_cards');
     const ftsCount = ftsCountResult ? ftsCountResult.count : 0;
-    
+
     console.log(`>> DB: ${cardsCount} cards found, ${ftsCount} cards indexed.`);
     console.log(">> DB: FTS RESET SUCCESSFUL");
 
@@ -289,300 +289,300 @@ export const isSourceTrusted = async (publicKey) => {
 // --- New Known Peers Functions --- //
 
 export const registerPeerIdentity = async (handle, publicKey) => {
-    const query = `
+  const query = `
         INSERT OR REPLACE INTO known_peers (public_key, handle, last_seen)
         VALUES (?, ?, ?);
     `;
-    return await runQuery(query, [publicKey, handle, Date.now()]);
+  return await runQuery(query, [publicKey, handle, Date.now()]);
 };
 
 export const getPeerHandle = async (publicKey) => {
-    const query = `SELECT handle FROM known_peers WHERE public_key = ? LIMIT 1;`;
-    const result = await runQuery(query, [publicKey]);
-    return result.length > 0 ? result[0].handle : null;
+  const query = `SELECT handle FROM known_peers WHERE public_key = ? LIMIT 1;`;
+  const result = await runQuery(query, [publicKey]);
+  return result.length > 0 ? result[0].handle : null;
 };
 
 // --- New Card Functions ---
 
 // 3. Pagination over FetchAll
 export const fetchCards = async (limit = 15, offset = 0, filters = {}) => {
-    try {
-        const whereClauses = [];
-        const params = [];
+  try {
+    const whereClauses = [];
+    const params = [];
 
-        // A. Respect the active tab ('My Knowledge' vs 'Learned')
-        if (filters.activeTab && filters.profileHandle) {
-            if (filters.activeTab === 'created') {
-                whereClauses.push('c.author_id = ?');
-                params.push(filters.profileHandle);
-            } else { // 'learned' tab
-                whereClauses.push('(c.author_id != ? OR c.author_id IS NULL)');
-                params.push(filters.profileHandle);
-            }
-        }
-        
-        // --- Phase 1: The Guardrail ---
-        if (filters.enforceBroadcastRule) {
-            whereClauses.push('(c.is_broadcast_enabled = 1 OR c.hops > 0)');
-        }
-        // -----------------------------
-
-        // --- 1. PRECISION SEARCH (Wheel Filter Active) ---
-        if (typeof filters.activeTopicFilter !== 'undefined' && filters.activeTopicFilter !== null) {
-            let baseQuery = `
-                SELECT c.*, CASE WHEN ts.publicKey IS NOT NULL THEN 1 ELSE 0 END AS is_trusted
-                FROM cards c
-                LEFT JOIN trusted_sources ts ON c.author_id = ts.publicKey
-            `;
-
-            // B. Handle the specific wheel slice or the center "general" slice
-            if (filters.activeTopicFilter === 'general') {
-                whereClauses.push("(c.topic IS NULL OR c.topic = 'human/general' OR c.topic = 'general')");
-            } else {
-                whereClauses.push('c.topic LIKE ?');
-                params.push(`%${filters.activeTopicFilter}%`);
-            }
-
-            if (whereClauses.length > 0) {
-                baseQuery += ' WHERE ' + whereClauses.join(' AND ');
-            }
-
-            baseQuery += ` ORDER BY is_trusted DESC, c.depth_score DESC, c.hops DESC, c.timestamp DESC LIMIT ? OFFSET ?`;
-            params.push(limit, offset);
-            
-            const results = await db.getAllAsync(baseQuery, params);
-            return results.map(card => ({
-                ...card,
-                genesis: typeof card.genesis === 'string' ? JSON.parse(card.genesis || '{}') : (card.genesis || {}),
-                history: typeof card.history === 'string' ? JSON.parse(card.history || '[]') : (card.history || [])
-            }));
-        }
-
-        // --- 2. SMART SORT (Default Dashboard View) ---
-        // This part has complex JS-based sorting which we will bypass if a broadcast rule is enforced
-        // for simplicity and performance.
-        if (filters.enforceBroadcastRule) {
-             let baseQuery = `
-                SELECT c.*, CASE WHEN ts.publicKey IS NOT NULL THEN 1 ELSE 0 END AS is_trusted
-                FROM cards c
-                LEFT JOIN trusted_sources ts ON c.author_id = ts.publicKey
-            `;
-            if (whereClauses.length > 0) {
-                baseQuery += ' WHERE ' + whereClauses.join(' AND ');
-            }
-            baseQuery += ` ORDER BY is_trusted DESC, c.depth_score DESC, c.hops DESC, c.timestamp DESC LIMIT ? OFFSET ?`;
-            params.push(limit, offset);
-            const results = await db.getAllAsync(baseQuery, params);
-            return results.map(card => ({
-                ...card,
-                genesis: typeof card.genesis === 'string' ? JSON.parse(card.genesis || '{}') : (card.genesis || {}),
-                history: typeof card.history === 'string' ? JSON.parse(card.history || '[]') : (card.history || [])
-            }));
-        }
-
-
-        const shouldShuffle = offset === 0;
-        const categoryRank = ['food', 'fitness', 'professional', 'education', 'fun'];
-
-        if (filters.activeTab === 'created') {
-            const userCards = await db.getAllAsync(
-                `SELECT * FROM cards WHERE author_id = ? ORDER BY depth_score DESC, hops DESC, timestamp DESC`,
-                [filters.profileHandle]
-            );
-
-            // Group by category first (with lowercase safety net)
-            const grouped = userCards.reduce((acc, card) => {
-                let topicFound = false;
-                const safeTopic = (card.topic || '').toLowerCase(); // Prevents strict-case bugs
-                for (const cat of categoryRank) {
-                    if (safeTopic.includes(cat)) {
-                        if (!acc[cat]) acc[cat] = [];
-                        acc[cat].push(card);
-                        topicFound = true;
-                        break;
-                    }
-                }
-                if (!topicFound) {
-                    if (!acc.other) acc.other = [];
-                    acc.other.push(card);
-                }
-                return acc;
-            }, {});
-
-            // Sort within each category by timestamp, then assemble the final list
-            let masterList = [];
-            for (const cat of categoryRank) {
-                if (grouped[cat]) {
-                    const sortedGroup = grouped[cat].sort((a, b) => b.timestamp - a.timestamp);
-                    masterList.push(...sortedGroup);
-                }
-            }
-            if(grouped.other) {
-                masterList.push(...(grouped.other.sort((a,b) => b.timestamp - a.timestamp)));
-            }
-
-            return masterList.slice(offset, offset + limit).map(card => ({
-                ...card,
-                genesis: typeof card.genesis === 'string' ? JSON.parse(card.genesis || '{}') : (card.genesis || {}),
-                history: typeof card.history === 'string' ? JSON.parse(card.history || '[]') : (card.history || [])
-            }));
-
-        } else { // This handles the 'Learned' tab
-            const learnedCardsRaw = await db.getAllAsync(
-                `SELECT * FROM cards WHERE (author_id != ? OR author_id IS NULL) ORDER BY depth_score DESC, hops DESC, timestamp DESC`,
-                [filters.profileHandle]
-            );
-
-            // Priority 1: Human Transfers
-            let humanTransfers = learnedCardsRaw.filter(c => c.author_id !== 'SYSTEM');
-            if (shouldShuffle) {
-                humanTransfers.sort(() => 0.5 - Math.random());
-            }
-
-            // Priority 2: JAWW Default/System cards
-            const systemCards = learnedCardsRaw.filter(c => c.author_id === 'SYSTEM');
-            const groupedSystem = systemCards.reduce((acc, card) => {
-                let topicFound = false;
-                const safeTopic = (card.topic || '').toLowerCase(); // Prevents strict-case bugs
-                for (const cat of categoryRank) {
-                    if (safeTopic.includes(cat)) {
-                        if (!acc[cat]) acc[cat] = [];
-                        acc[cat].push(card);
-                        topicFound = true;
-                        break;
-                    }
-                }
-                if (!topicFound) {
-                    if (!acc.other) acc.other = [];
-                    acc.other.push(card);
-                }
-                return acc;
-            }, {});
-
-            let sortedSystemCards = [];
-            for (const cat of categoryRank) {
-                if (groupedSystem[cat]) {
-                    sortedSystemCards.push(...groupedSystem[cat]);
-                }
-            }
-            if(groupedSystem.other) {
-                sortedSystemCards.push(...groupedSystem.other);
-            }
-
-            const masterList = [...humanTransfers, ...sortedSystemCards];
-            return masterList.slice(offset, offset + limit).map(card => ({
-                ...card,
-                genesis: typeof card.genesis === 'string' ? JSON.parse(card.genesis || '{}') : (card.genesis || {}),
-                history: typeof card.history === 'string' ? JSON.parse(card.history || '[]') : (card.history || [])
-            }));
-        }
-    } catch (e) {
-        console.log(">> ORACLE: Fetching cards failed", e.message);
-        return [];
+    // A. Respect the active tab ('My Knowledge' vs 'Learned')
+    if (filters.activeTab && filters.profileHandle) {
+      if (filters.activeTab === 'created') {
+        whereClauses.push('c.author_id = ?');
+        params.push(filters.profileHandle);
+      } else { // 'learned' tab
+        whereClauses.push('(c.author_id != ? OR c.author_id IS NULL)');
+        params.push(filters.profileHandle);
+      }
     }
+
+    // --- Phase 1: The Guardrail ---
+    if (filters.enforceBroadcastRule) {
+      whereClauses.push('(c.is_broadcast_enabled = 1 OR c.hops > 0)');
+    }
+    // -----------------------------
+
+    // --- 1. PRECISION SEARCH (Wheel Filter Active) ---
+    if (typeof filters.activeTopicFilter !== 'undefined' && filters.activeTopicFilter !== null) {
+      let baseQuery = `
+                SELECT c.*, CASE WHEN ts.publicKey IS NOT NULL THEN 1 ELSE 0 END AS is_trusted
+                FROM cards c
+                LEFT JOIN trusted_sources ts ON c.author_id = ts.publicKey
+            `;
+
+      // B. Handle the specific wheel slice or the center "general" slice
+      if (filters.activeTopicFilter === 'general') {
+        whereClauses.push("(c.topic IS NULL OR c.topic = 'human/general' OR c.topic = 'general')");
+      } else {
+        whereClauses.push('c.topic LIKE ?');
+        params.push(`%${filters.activeTopicFilter}%`);
+      }
+
+      if (whereClauses.length > 0) {
+        baseQuery += ' WHERE ' + whereClauses.join(' AND ');
+      }
+
+      baseQuery += ` ORDER BY is_trusted DESC, c.depth_score DESC, c.hops DESC, c.timestamp DESC LIMIT ? OFFSET ?`;
+      params.push(limit, offset);
+
+      const results = await db.getAllAsync(baseQuery, params);
+      return results.map(card => ({
+        ...card,
+        genesis: typeof card.genesis === 'string' ? JSON.parse(card.genesis || '{}') : (card.genesis || {}),
+        history: typeof card.history === 'string' ? JSON.parse(card.history || '[]') : (card.history || [])
+      }));
+    }
+
+    // --- 2. SMART SORT (Default Dashboard View) ---
+    // This part has complex JS-based sorting which we will bypass if a broadcast rule is enforced
+    // for simplicity and performance.
+    if (filters.enforceBroadcastRule) {
+      let baseQuery = `
+                SELECT c.*, CASE WHEN ts.publicKey IS NOT NULL THEN 1 ELSE 0 END AS is_trusted
+                FROM cards c
+                LEFT JOIN trusted_sources ts ON c.author_id = ts.publicKey
+            `;
+      if (whereClauses.length > 0) {
+        baseQuery += ' WHERE ' + whereClauses.join(' AND ');
+      }
+      baseQuery += ` ORDER BY is_trusted DESC, c.depth_score DESC, c.hops DESC, c.timestamp DESC LIMIT ? OFFSET ?`;
+      params.push(limit, offset);
+      const results = await db.getAllAsync(baseQuery, params);
+      return results.map(card => ({
+        ...card,
+        genesis: typeof card.genesis === 'string' ? JSON.parse(card.genesis || '{}') : (card.genesis || {}),
+        history: typeof card.history === 'string' ? JSON.parse(card.history || '[]') : (card.history || [])
+      }));
+    }
+
+
+    const shouldShuffle = offset === 0;
+    const categoryRank = ['food', 'fitness', 'professional', 'education', 'fun'];
+
+    if (filters.activeTab === 'created') {
+      const userCards = await db.getAllAsync(
+        `SELECT * FROM cards WHERE author_id = ? ORDER BY depth_score DESC, hops DESC, timestamp DESC`,
+        [filters.profileHandle]
+      );
+
+      // Group by category first (with lowercase safety net)
+      const grouped = userCards.reduce((acc, card) => {
+        let topicFound = false;
+        const safeTopic = (card.topic || '').toLowerCase(); // Prevents strict-case bugs
+        for (const cat of categoryRank) {
+          if (safeTopic.includes(cat)) {
+            if (!acc[cat]) acc[cat] = [];
+            acc[cat].push(card);
+            topicFound = true;
+            break;
+          }
+        }
+        if (!topicFound) {
+          if (!acc.other) acc.other = [];
+          acc.other.push(card);
+        }
+        return acc;
+      }, {});
+
+      // Sort within each category by timestamp, then assemble the final list
+      let masterList = [];
+      for (const cat of categoryRank) {
+        if (grouped[cat]) {
+          const sortedGroup = grouped[cat].sort((a, b) => b.timestamp - a.timestamp);
+          masterList.push(...sortedGroup);
+        }
+      }
+      if (grouped.other) {
+        masterList.push(...(grouped.other.sort((a, b) => b.timestamp - a.timestamp)));
+      }
+
+      return masterList.slice(offset, offset + limit).map(card => ({
+        ...card,
+        genesis: typeof card.genesis === 'string' ? JSON.parse(card.genesis || '{}') : (card.genesis || {}),
+        history: typeof card.history === 'string' ? JSON.parse(card.history || '[]') : (card.history || [])
+      }));
+
+    } else { // This handles the 'Learned' tab
+      const learnedCardsRaw = await db.getAllAsync(
+        `SELECT * FROM cards WHERE (author_id != ? OR author_id IS NULL) ORDER BY depth_score DESC, hops DESC, timestamp DESC`,
+        [filters.profileHandle]
+      );
+
+      // Priority 1: Human Transfers
+      let humanTransfers = learnedCardsRaw.filter(c => c.author_id !== 'SYSTEM');
+      if (shouldShuffle) {
+        humanTransfers.sort(() => 0.5 - Math.random());
+      }
+
+      // Priority 2: JAWW Default/System cards
+      const systemCards = learnedCardsRaw.filter(c => c.author_id === 'SYSTEM');
+      const groupedSystem = systemCards.reduce((acc, card) => {
+        let topicFound = false;
+        const safeTopic = (card.topic || '').toLowerCase(); // Prevents strict-case bugs
+        for (const cat of categoryRank) {
+          if (safeTopic.includes(cat)) {
+            if (!acc[cat]) acc[cat] = [];
+            acc[cat].push(card);
+            topicFound = true;
+            break;
+          }
+        }
+        if (!topicFound) {
+          if (!acc.other) acc.other = [];
+          acc.other.push(card);
+        }
+        return acc;
+      }, {});
+
+      let sortedSystemCards = [];
+      for (const cat of categoryRank) {
+        if (groupedSystem[cat]) {
+          sortedSystemCards.push(...groupedSystem[cat]);
+        }
+      }
+      if (groupedSystem.other) {
+        sortedSystemCards.push(...groupedSystem.other);
+      }
+
+      const masterList = [...humanTransfers, ...sortedSystemCards];
+      return masterList.slice(offset, offset + limit).map(card => ({
+        ...card,
+        genesis: typeof card.genesis === 'string' ? JSON.parse(card.genesis || '{}') : (card.genesis || {}),
+        history: typeof card.history === 'string' ? JSON.parse(card.history || '[]') : (card.history || [])
+      }));
+    }
+  } catch (e) {
+    console.log(">> ORACLE: Fetching cards failed", e.message);
+    return [];
+  }
 };
 
 export const getAllCards = async () => {
-    try {
-        const results = await db.getAllAsync(`
+  try {
+    const results = await db.getAllAsync(`
             SELECT c.*, CASE WHEN ts.publicKey IS NOT NULL THEN 1 ELSE 0 END AS is_trusted
             FROM cards c
             LEFT JOIN trusted_sources ts ON c.author_id = ts.publicKey
             ORDER BY is_trusted DESC, c.depth_score DESC, c.hops DESC, c.timestamp DESC
         `);
-        return results.map(card => ({
-            ...card,
-            genesis: typeof card.genesis === 'string' ? JSON.parse(card.genesis || '{}') : (card.genesis || {}),
-            history: typeof card.history === 'string' ? JSON.parse(card.history || '[]') : (card.history || [])
-        }));
-    } catch (e) {
-        console.error(">> Fetching all cards failed", e);
-        return [];
-    }
+    return results.map(card => ({
+      ...card,
+      genesis: typeof card.genesis === 'string' ? JSON.parse(card.genesis || '{}') : (card.genesis || {}),
+      history: typeof card.history === 'string' ? JSON.parse(card.history || '[]') : (card.history || [])
+    }));
+  } catch (e) {
+    console.error(">> Fetching all cards failed", e);
+    return [];
+  }
 };
 
 export const searchCards = async (query, filters = {}) => {
-    try {
-        if (query.startsWith('source:')) {
-            const targetKey = query.substring(7);
-            const whereClauses = ['c.author_id = ?'];
-            const params = [targetKey];
+  try {
+    if (query.startsWith('source:')) {
+      const targetKey = query.substring(7);
+      const whereClauses = ['c.author_id = ?'];
+      const params = [targetKey];
 
-            if (filters.activeTab && filters.profileHandle) {
-                if (filters.activeTab === 'created') {
-                    whereClauses.push('c.author_id = ?');
-                    params.push(filters.profileHandle);
-                } else {
-                    whereClauses.push('(c.author_id != ? OR c.author_id IS NULL)');
-                    params.push(filters.profileHandle);
-                }
-            }
+      if (filters.activeTab && filters.profileHandle) {
+        if (filters.activeTab === 'created') {
+          whereClauses.push('c.author_id = ?');
+          params.push(filters.profileHandle);
+        } else {
+          whereClauses.push('(c.author_id != ? OR c.author_id IS NULL)');
+          params.push(filters.profileHandle);
+        }
+      }
 
-            if (typeof filters.activeTopicFilter !== 'undefined') {
-                if (filters.activeTopicFilter === null || filters.activeTopicFilter === 'general') {
-                    whereClauses.push("(c.topic IS NULL OR c.topic = 'human/general' OR c.topic = 'general')");
-                } else {
-                    whereClauses.push('c.topic LIKE ?');
-                    params.push(`%${filters.activeTopicFilter}%`);
-                }
-            }
+      if (typeof filters.activeTopicFilter !== 'undefined') {
+        if (filters.activeTopicFilter === null || filters.activeTopicFilter === 'general') {
+          whereClauses.push("(c.topic IS NULL OR c.topic = 'human/general' OR c.topic = 'general')");
+        } else {
+          whereClauses.push('c.topic LIKE ?');
+          params.push(`%${filters.activeTopicFilter}%`);
+        }
+      }
 
-            const sql = `
+      const sql = `
                 SELECT c.*, CASE WHEN ts.publicKey IS NOT NULL THEN 1 ELSE 0 END AS is_trusted
                 FROM cards c 
                 LEFT JOIN trusted_sources ts ON c.author_id = ts.publicKey
                 WHERE ${whereClauses.join(' AND ')}
                 ORDER BY c.depth_score DESC, c.hops DESC, c.timestamp DESC
             `;
-            const results = await db.getAllAsync(sql, params);
-            return results.map(card => ({
-                ...card,
-                genesis: typeof card.genesis === 'string' ? JSON.parse(card.genesis || '{}') : (card.genesis || {}),
-                history: typeof card.history === 'string' ? JSON.parse(card.history || '[]') : (card.history || [])
-            }));
-        }
+      const results = await db.getAllAsync(sql, params);
+      return results.map(card => ({
+        ...card,
+        genesis: typeof card.genesis === 'string' ? JSON.parse(card.genesis || '{}') : (card.genesis || {}),
+        history: typeof card.history === 'string' ? JSON.parse(card.history || '[]') : (card.history || [])
+      }));
+    }
 
-        // Run query through the Semantic Engine
-        const expandedTerms = expandQuery(query);
-        
-        if (!expandedTerms || expandedTerms.length === 0) return [];
+    // Run query through the Semantic Engine
+    const expandedTerms = expandQuery(query);
 
-        // Build a robust FTS5 'OR' string (e.g., '"cooking"* OR "culinary"* OR "recipe"*')
-        const ftsQuery = expandedTerms.map(term => {
-            const sanitizedTerm = term.replace(/'/g, "''");
-            return `"${sanitizedTerm}"*`; 
-        }).join(' OR ');
+    if (!expandedTerms || expandedTerms.length === 0) return [];
 
-        // 3. FIX THE FTS ALIAS: Use 'f MATCH' instead of 'fts_cards MATCH'
-        const whereClauses = ["f MATCH ?"];
-        const params = [ftsQuery];
+    // Build a robust FTS5 'OR' string (e.g., '"cooking"* OR "culinary"* OR "recipe"*')
+    const ftsQuery = expandedTerms.map(term => {
+      const sanitizedTerm = term.replace(/'/g, "''");
+      return `"${sanitizedTerm}"*`;
+    }).join(' OR ');
 
-        if (filters.activeTab && filters.profileHandle) {
-            if (filters.activeTab === 'created') {
-                whereClauses.push('c.author_id = ?');
-                params.push(filters.profileHandle);
-            } else {
-                whereClauses.push('(c.author_id != ? OR c.author_id IS NULL)');
-                params.push(filters.profileHandle);
-            }
-        }
-        
-        // --- Phase 1: The Guardrail ---
-        if (filters.enforceBroadcastRule) {
-            whereClauses.push('(c.is_broadcast_enabled = 1 OR c.hops > 0)');
-        }
-        // -----------------------------
+    // 3. FIX THE FTS ALIAS: Use 'f MATCH' instead of 'fts_cards MATCH'
+    const whereClauses = ["f MATCH ?"];
+    const params = [ftsQuery];
 
-        if (typeof filters.activeTopicFilter !== 'undefined') {
-            if (filters.activeTopicFilter === null || filters.activeTopicFilter === 'general') {
-                whereClauses.push("(c.topic IS NULL OR c.topic = 'human/general' OR c.topic = 'general')");
-            } else {
-                whereClauses.push('c.topic LIKE ?');
-                params.push(`%${filters.activeTopicFilter}%`);
-            }
-        }
-        
-        const sql = `
+    if (filters.activeTab && filters.profileHandle) {
+      if (filters.activeTab === 'created') {
+        whereClauses.push('c.author_id = ?');
+        params.push(filters.profileHandle);
+      } else {
+        whereClauses.push('(c.author_id != ? OR c.author_id IS NULL)');
+        params.push(filters.profileHandle);
+      }
+    }
+
+    // --- Phase 1: The Guardrail ---
+    if (filters.enforceBroadcastRule) {
+      whereClauses.push('(c.is_broadcast_enabled = 1 OR c.hops > 0)');
+    }
+    // -----------------------------
+
+    if (typeof filters.activeTopicFilter !== 'undefined') {
+      if (filters.activeTopicFilter === null || filters.activeTopicFilter === 'general') {
+        whereClauses.push("(c.topic IS NULL OR c.topic = 'human/general' OR c.topic = 'general')");
+      } else {
+        whereClauses.push('c.topic LIKE ?');
+        params.push(`%${filters.activeTopicFilter}%`);
+      }
+    }
+
+    const sql = `
             SELECT c.*, CASE WHEN ts.publicKey IS NOT NULL THEN 1 ELSE 0 END AS is_trusted
             FROM cards c 
             JOIN fts_cards f ON c.rowid = f.rowid 
@@ -591,151 +591,151 @@ export const searchCards = async (query, filters = {}) => {
             ORDER BY is_trusted DESC, f.rank, c.depth_score DESC, c.hops DESC
         `;
 
-        const results = await db.getAllAsync(sql, params);
+    const results = await db.getAllAsync(sql, params);
 
-        return results.map(card => ({
-            ...card,
-            genesis: typeof card.genesis === 'string' ? JSON.parse(card.genesis || '{}') : (card.genesis || {}),
-            history: typeof card.history === 'string' ? JSON.parse(card.history || '[]') : (card.history || [])
-        }));
-    } catch (e) {
-        console.log(">> ORACLE: FTS5 partial query skipped:", e.message);
-        return [];
-    }
+    return results.map(card => ({
+      ...card,
+      genesis: typeof card.genesis === 'string' ? JSON.parse(card.genesis || '{}') : (card.genesis || {}),
+      history: typeof card.history === 'string' ? JSON.parse(card.history || '[]') : (card.history || [])
+    }));
+  } catch (e) {
+    console.log(">> ORACLE: FTS5 partial query skipped:", e.message);
+    return [];
+  }
 }
 
 export const getCardsByTopic = async (topicSubstring) => {
-    try {
-        // Uses standard SQL LIKE to safely match "fitness" inside "health & fitness"
-        // Bypasses the FTS5 tokenization completely.
-        const results = await db.getAllAsync(
-            `SELECT * FROM cards WHERE topic LIKE ? ORDER BY depth_score DESC, hops DESC, timestamp DESC`,
-            [`%${topicSubstring}%`]
-        );
-        
-        return results.map(card => ({
-            ...card,
-            genesis: typeof card.genesis === 'string' ? JSON.parse(card.genesis || '{}') : (card.genesis || {}),
-            history: typeof card.history === 'string' ? JSON.parse(card.history || '[]') : (card.history || [])
-        }));
-    } catch (e) {
-        console.error(">> Fetching by topic failed", e);
-        return [];
-    }
+  try {
+    // Uses standard SQL LIKE to safely match "fitness" inside "health & fitness"
+    // Bypasses the FTS5 tokenization completely.
+    const results = await db.getAllAsync(
+      `SELECT * FROM cards WHERE topic LIKE ? ORDER BY depth_score DESC, hops DESC, timestamp DESC`,
+      [`%${topicSubstring}%`]
+    );
+
+    return results.map(card => ({
+      ...card,
+      genesis: typeof card.genesis === 'string' ? JSON.parse(card.genesis || '{}') : (card.genesis || {}),
+      history: typeof card.history === 'string' ? JSON.parse(card.history || '[]') : (card.history || [])
+    }));
+  } catch (e) {
+    console.error(">> Fetching by topic failed", e);
+    return [];
+  }
 }
 
 export const insertOrReplaceCard = async (card) => {
-    try {
-        // Calculate the DAG-based depth score before inserting
-        const depthScore = calculateDepthScore(card.history);
+  try {
+    // Calculate the DAG-based depth score before inserting
+    const depthScore = calculateDepthScore(card.history);
 
-        const p = [
+    const p = [
+      String(card.id || ''),
+      String(card.title || ''),
+      String(card.body || ''),
+      String(card.topic || ''),
+      card.subject ? String(card.subject) : null,
+      (card.genesis && card.genesis.author_id) ? String(card.genesis.author_id) : null,
+      (card.genesis && card.genesis.timestamp) ? new Date(card.genesis.timestamp).getTime() : Date.now(),
+      parseInt(card.hops || 0, 10),
+      card.genesis ? JSON.stringify(card.genesis) : null,
+      card.history ? JSON.stringify(card.history) : '[]',
+      card.forkedFrom ? String(card.forkedFrom) : null,
+      depthScore, // Save the calculated depth score
+      // --- NEW: Ledger Stats ---
+      parseInt(card.hop_count || 0, 10),
+      parseInt(card.network_reach || 1, 10),
+      // --- NEW: Lineage ---
+      card.parent_id ? String(card.parent_id) : null,
+      card.parent_hash ? String(card.parent_hash) : null,
+      card.event_id ? String(card.event_id) : null
+    ];
+
+    console.log(`>> DB: Inserting/Replacing card with ID [${card.id}], depth_score: ${depthScore}`);
+
+    await db.runAsync(
+      `INSERT OR REPLACE INTO cards 
+            (id, title, body, topic, subject, author_id, timestamp, hops, genesis, history, forkedFrom, depth_score, hop_count, network_reach, parent_id, parent_hash, event_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      p
+    );
+
+    const verifyRead = await db.getFirstAsync('SELECT id, depth_score FROM cards WHERE id = ?', [card.id]);
+    if (verifyRead) {
+      console.log(`>> DB: VERIFIED insert for ID [${card.id}], depth_score: ${verifyRead.depth_score}`);
+    } else {
+      console.error(`>> DB: FAILED to verify insert for ID [${card.id}]`);
+    }
+
+  } catch (e) {
+    console.error(">> Inserting card failed", e);
+  }
+};
+
+export const deleteCard = async (cardId) => {
+  try {
+    await db.runAsync(`DELETE FROM cards WHERE id = ?`, [cardId]);
+  } catch (e) {
+    console.error(">> Deleting card failed", e);
+  }
+};
+
+// --- Phase 1: Broadcast Toggle Function ---
+export const setCardBroadcast = async (cardId, isEnabled) => {
+  try {
+    await db.runAsync(
+      `UPDATE cards SET is_broadcast_enabled = ? WHERE id = ?`,
+      [isEnabled ? 1 : 0, cardId]
+    );
+    console.log(`>> DB: Set is_broadcast_enabled=${isEnabled} for card ${cardId}`);
+  } catch (e) {
+    console.error(">> DB: Updating broadcast flag failed", e);
+  }
+};
+
+// 4. Safe Data Migration Script (DB part)
+export const batchInsertCards = async (cards) => {
+  try {
+    await db.withTransactionAsync(async () => {
+      for (const card of cards) {
+        // Ensure genesis exists and has the required fields
+        if (card.genesis && card.genesis.author_id && card.genesis.timestamp) {
+          const p = [
             String(card.id || ''),
             String(card.title || ''),
             String(card.body || ''),
             String(card.topic || ''),
             card.subject ? String(card.subject) : null,
-            (card.genesis && card.genesis.author_id) ? String(card.genesis.author_id) : null,
-            (card.genesis && card.genesis.timestamp) ? new Date(card.genesis.timestamp).getTime() : Date.now(),
+            String(card.genesis.author_id || ''),
+            new Date(card.genesis.timestamp).getTime() || Date.now(),
             parseInt(card.hops || 0, 10),
-            card.genesis ? JSON.stringify(card.genesis) : null,
-            card.history ? JSON.stringify(card.history) : '[]',
-            card.forkedFrom ? String(card.forkedFrom) : null,
-            depthScore, // Save the calculated depth score
-            // --- NEW: Ledger Stats ---
-            parseInt(card.hop_count || 0, 10),
-            parseInt(card.network_reach || 1, 10),
-            // --- NEW: Lineage ---
-            card.parent_id ? String(card.parent_id) : null,
-            card.parent_hash ? String(card.parent_hash) : null,
-            card.event_id ? String(card.event_id) : null
-        ];
-
-        console.log(`>> DB: Inserting/Replacing card with ID [${card.id}], depth_score: ${depthScore}`);
-
-        await db.runAsync(
-            `INSERT OR REPLACE INTO cards 
-            (id, title, body, topic, subject, author_id, timestamp, hops, genesis, history, forkedFrom, depth_score, hop_count, network_reach, parent_id, parent_hash, event_id)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            p
-        );
-
-        const verifyRead = await db.getFirstAsync('SELECT id, depth_score FROM cards WHERE id = ?', [card.id]);
-        if (verifyRead) {
-            console.log(`>> DB: VERIFIED insert for ID [${card.id}], depth_score: ${verifyRead.depth_score}`);
-        } else {
-            console.error(`>> DB: FAILED to verify insert for ID [${card.id}]`);
-        }
-
-    } catch (e) {
-        console.error(">> Inserting card failed", e);
-    }
-};
-
-export const deleteCard = async (cardId) => {
-    try {
-        await db.runAsync(`DELETE FROM cards WHERE id = ?`, [cardId]);
-    } catch (e) {
-        console.error(">> Deleting card failed", e);
-    }
-};
-
-// --- Phase 1: Broadcast Toggle Function ---
-export const setCardBroadcast = async (cardId, isEnabled) => {
-    try {
-        await db.runAsync(
-            `UPDATE cards SET is_broadcast_enabled = ? WHERE id = ?`,
-            [isEnabled ? 1 : 0, cardId]
-        );
-        console.log(`>> DB: Set is_broadcast_enabled=${isEnabled} for card ${cardId}`);
-    } catch (e) {
-        console.error(">> DB: Updating broadcast flag failed", e);
-    }
-};
-
-// 4. Safe Data Migration Script (DB part)
-export const batchInsertCards = async (cards) => {
-    try {
-        await db.withTransactionAsync(async () => {
-            for (const card of cards) {
-                // Ensure genesis exists and has the required fields
-                if (card.genesis && card.genesis.author_id && card.genesis.timestamp) {
-                     const p = [
-                        String(card.id || ''),
-                        String(card.title || ''),
-                        String(card.body || ''),
-                        String(card.topic || ''),
-                        card.subject ? String(card.subject) : null,
-                        String(card.genesis.author_id || ''),
-                        new Date(card.genesis.timestamp).getTime() || Date.now(),
-                        parseInt(card.hops || 0, 10),
-                        JSON.stringify(card.genesis),
-                        JSON.stringify(card.history || []),
-                        card.forkedFrom ? String(card.forkedFrom) : null
-                    ];
-                    await db.runAsync(
-                        `INSERT INTO cards (id, title, body, topic, subject, author_id, timestamp, hops, genesis, history, forkedFrom)
+            JSON.stringify(card.genesis),
+            JSON.stringify(card.history || []),
+            card.forkedFrom ? String(card.forkedFrom) : null
+          ];
+          await db.runAsync(
+            `INSERT OR IGNORE INTO cards (id, title, body, topic, subject, author_id, timestamp, hops, genesis, history, forkedFrom)
                          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                        p
-                    );
-                } else {
-                    console.warn(">> Skipping card with missing genesis data:", card.id);
-                }
-            }
-        });
-        console.log(">> Batch insert of cards complete.");
-    } catch (e) {
-        console.error(">> Batch inserting cards failed", e);
-        throw e; // Re-throw to be caught by the migration script
-    }
+            p
+          );
+        } else {
+          console.warn(">> Skipping card with missing genesis data:", card.id);
+        }
+      }
+    });
+    console.log(">> Batch insert of cards complete.");
+  } catch (e) {
+    console.error(">> Batch inserting cards failed", e);
+    throw e; // Re-throw to be caught by the migration script
+  }
 };
 
 // --- Transfer Log Functions ---
 export const calculateTrueHops = (historyArray) => {
-    if (!Array.isArray(historyArray) || historyArray.length === 0) return 0;
-    
-    // With a verified chain, we just need to count the verified array length.
-    return historyArray.length;
+  if (!Array.isArray(historyArray) || historyArray.length === 0) return 0;
+
+  // With a verified chain, we just need to count the verified array length.
+  return historyArray.length;
 };
 
 export const insertTransferRecord = async ({ cardId, recipientHandle, timestamp }) => {
@@ -749,7 +749,7 @@ export const insertTransferRecord = async ({ cardId, recipientHandle, timestamp 
     console.log(`>> DB: Telemetry Logged -> Card ${cardId} to ${recipientHandle}`);
   } catch (error) {
     console.error(">> DB Error inserting transfer record:", error);
-    throw error; 
+    throw error;
   }
 };
 
@@ -760,7 +760,7 @@ export const getCardById = async (id) => {
       `SELECT * FROM cards WHERE id = ? LIMIT 1`,
       [id]
     );
-    
+
     if (results.length > 0) {
       let item = results[0];
       try {
@@ -782,13 +782,13 @@ export const getCardById = async (id) => {
 };
 
 export const getAllTopics = async () => {
-    try {
-        const results = await db.getAllAsync(`SELECT DISTINCT topic FROM cards`);
-        return results.map(r => r.topic);
-    } catch(e) { 
-        console.error(">> Getting all topics failed", e);
-        return []; 
-    }
+  try {
+    const results = await db.getAllAsync(`SELECT DISTINCT topic FROM cards`);
+    return results.map(r => r.topic);
+  } catch (e) {
+    console.error(">> Getting all topics failed", e);
+    return [];
+  }
 };
 
 export const blockOperator = async (publicKey, cardHash, reason) => {
@@ -815,6 +815,27 @@ export const blockOperator = async (publicKey, cardHash, reason) => {
   } catch (error) {
     console.error(">> DB Error blocking operator:", error);
     throw error;
+  }
+};
+
+export const quarantineCard = async (card) => {
+  try {
+    await db.withTransactionAsync(async () => {
+      // 1. Delete from cards
+      await db.runAsync('DELETE FROM cards WHERE id = ?', [card.id]);
+      
+      // 2. Add to quarantine
+      const cardHash = card.hash || card.content_hash || card.id; 
+      if (cardHash) {
+        await db.runAsync(
+          'INSERT OR IGNORE INTO quarantined_hashes (hash, quarantined_at) VALUES (?, ?)',
+          [cardHash, new Date().toISOString()]
+        );
+      }
+    });
+    console.log(`>> DB: Quarantined corrupted card [${card.id}]`);
+  } catch (error) {
+    console.error(">> DB Error quarantining card:", error);
   }
 };
 
@@ -868,16 +889,16 @@ export const getCategoryForSubject = async (subject) => {
 
 // Helper function if you need raw access elsewhere
 export const runQuery = async (sql, params = []) => {
-    try {
-        if (sql.trim().toUpperCase().startsWith('SELECT')) {
-            return await db.getAllAsync(sql, params);
-        } else {
-            return await db.runAsync(sql, params);
-        }
-    } catch (e) {
-        console.error(e);
-        return null;
+  try {
+    if (sql.trim().toUpperCase().startsWith('SELECT')) {
+      return await db.getAllAsync(sql, params);
+    } else {
+      return await db.runAsync(sql, params);
     }
+  } catch (e) {
+    console.error(e);
+    return null;
+  }
 }
 
 export const getOperatorStats = async (userHandle, eventStartTime = 0) => {
@@ -885,7 +906,7 @@ export const getOperatorStats = async (userHandle, eventStartTime = 0) => {
     // Ensure eventStartTime is a number to properly compare with SQLite INTEGER timestamps
     const startTime = Number(eventStartTime) || 0;
 
-   // 1. Get stats for the specific operator, scoped by time.
+    // 1. Get stats for the specific operator, scoped by time.
     // EXPERTISE SCORE = (Total known devices) * (Deepest known chain of custody)
     const userStatsResult = await db.getFirstAsync(
       `SELECT 
@@ -923,8 +944,8 @@ export const getOperatorStats = async (userHandle, eventStartTime = 0) => {
       authoredCount: userStatsResult?.authoredCount || 0,
       expertiseScore: userStatsResult?.expertiseScore || 0,
       totalVaultSize: vaultSizeResult?.totalVaultSize || 0,
-      domainDominance: dominantTopicResult?.topic 
-        ? dominantTopicResult.topic.replace('human/', '').toUpperCase() 
+      domainDominance: dominantTopicResult?.topic
+        ? dominantTopicResult.topic.replace('human/', '').toUpperCase()
         : 'GENERAL',
     };
 
@@ -970,9 +991,9 @@ export const getCardsByEvent = async (eventId) => {
 
     // Parse the JSON history/genesis arrays just like the main vault does
     return results.map(card => ({
-        ...card,
-        genesis: typeof card.genesis === 'string' ? JSON.parse(card.genesis || '{}') : (card.genesis || {}),
-        history: typeof card.history === 'string' ? JSON.parse(card.history || '[]') : (card.history || [])
+      ...card,
+      genesis: typeof card.genesis === 'string' ? JSON.parse(card.genesis || '{}') : (card.genesis || {}),
+      history: typeof card.history === 'string' ? JSON.parse(card.history || '[]') : (card.history || [])
     }));
   } catch (error) {
     console.error(`>> DB Error fetching cards for event ${eventId}:`, error);
@@ -981,18 +1002,18 @@ export const getCardsByEvent = async (eventId) => {
 };
 
 export const deleteEvent = async (eventId) => {
-    try {
-        await db.withTransactionAsync(async () => {
-            // 1. Delete the event itself
-            await db.runAsync(`DELETE FROM events WHERE id = ?`, [eventId]);
+  try {
+    await db.withTransactionAsync(async () => {
+      // 1. Delete the event itself
+      await db.runAsync(`DELETE FROM events WHERE id = ?`, [eventId]);
 
-            // 2. Delete all cards associated with this event
-            await db.runAsync(`DELETE FROM cards WHERE event_id = ?`, [eventId]);
-        });
-        console.log(`>> DB: Deleted event ${eventId} and all associated cards.`);
-    } catch (error) {
-        console.error(`>> DB Error deleting event ${eventId}:`, error);
-    }
+      // 2. Delete all cards associated with this event
+      await db.runAsync(`DELETE FROM cards WHERE event_id = ?`, [eventId]);
+    });
+    console.log(`>> DB: Deleted event ${eventId} and all associated cards.`);
+  } catch (error) {
+    console.error(`>> DB Error deleting event ${eventId}:`, error);
+  }
 };
 
 // --- UMPIRE MODE QUEUE FUNCTIONS ---
@@ -1070,7 +1091,7 @@ export const reconcileUmpireQueue = async () => {
     if (staleQueueEntries.length > 0) {
       const staleIdsToDelete = staleQueueEntries.map(p => p.id);
       const deletePlaceholders = staleIdsToDelete.map(() => '?').join(',');
-      
+
       await db.runAsync(
         `DELETE FROM umpire_sync_queue WHERE id IN (${deletePlaceholders})`,
         staleIdsToDelete

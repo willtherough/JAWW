@@ -7,6 +7,7 @@ import { getAllTopics, getAllCards } from '../model/database';
 import { signData, getOrGenerateKeys } from '../model/Security';
 import { getAdvertisedCard, setAdvertisedCard, clearAdvertisedCard } from './BroadcastState';
 import { loadProfile } from '../model/Storage';
+import WifiMeshService from './WifiMeshService';
 
 const SOURCE_UUID = '00001101-0000-1000-8000-00805F9B34FB';
 const COMPANY_ID = 0x00FF;
@@ -444,6 +445,8 @@ const truncateToSafeBytes = (str, maxBytes) => {
                     try { await device.requestMTU(512); } catch (e) {}
                     await new Promise(r => setTimeout(r, 500));
                     await new Promise(r => setTimeout(r, 1000));
+                    await new Promise(r => setTimeout(r, 500));
+                    if (!(await device.isConnected())) throw new Error("Device disconnected before discovery.");
                     await device.discoverAllServicesAndCharacteristics();
 
                     // --- 1. POPULATE SENDER IDENTITY & HASH ---
@@ -585,6 +588,8 @@ const truncateToSafeBytes = (str, maxBytes) => {
                     }
                     // -----------------------------
 
+                    await new Promise(r => setTimeout(r, 500));
+                    if (!(await device.isConnected())) throw new Error("Device disconnected before discovery.");
                     await device.discoverAllServicesAndCharacteristics();
                     
                     const cleanServiceUUID = TRANSFER_SERVICE_UUID.toLowerCase();
@@ -694,6 +699,8 @@ const truncateToSafeBytes = (str, maxBytes) => {
                     // 4. Map the services now that the pipe is stable
                     console.log(">> CLIENT: Discovering services...");
                     await new Promise(r => setTimeout(r, 1000));
+                    await new Promise(r => setTimeout(r, 500));
+                    if (!(await device.isConnected())) throw new Error("Device disconnected before discovery.");
                     await device.discoverAllServicesAndCharacteristics();
 
                     const cleanServiceUUID = TRANSFER_SERVICE_UUID.toLowerCase();
@@ -781,8 +788,29 @@ const truncateToSafeBytes = (str, maxBytes) => {
                                 const finalData = combinedBuffer.replace('__EOF__', '');
                                 this.incomingBuffer = ""; 
 
+                                // === VECTOR 1: SMART ROUTER WI-FI UPGRADE INTERCEPT ===
+                                let payloadToParse = finalData;
+                                if (finalData.startsWith('REQ:WIFI_UPGRADE:')) {
+                                    console.log(">> SMART ROUTER: Intercepted Wi-Fi Override. Handing off to TCP Socket layer...");
+                                    const parts = finalData.split(':');
+                                    const targetIp = parts[2];
+                                    const targetPort = parseInt(parts[3], 10);
+                                    
+                                    try {
+                                        const socketData = await WifiMeshService.fetchPayload(targetIp, targetPort);
+                                        payloadToParse = socketData;
+                                        console.log(">> SMART ROUTER: TCP stream complete. Re-entering standard pipeline...");
+                                    } catch (wifiErr) {
+                                        console.error(">> SMART ROUTER FAILED:", wifiErr);
+                                        clearTimeout(connectionTimeout);
+                                        resolve({ success: false, error: "High-Speed Wi-Fi Transfer failed or interrupted." });
+                                        await cleanup();
+                                        return;
+                                    }
+                                }
+
                                 try {
-                                    const card = JSON.parse(finalData);
+                                    const card = JSON.parse(payloadToParse);
                                     console.log(">> CLIENT: SUCCESS! Unpacked Payload.");
 
                                     if (card.error) {
@@ -869,6 +897,8 @@ const truncateToSafeBytes = (str, maxBytes) => {
 
             try {
                 const device = await this.manager.connectToDevice(umpireDeviceId, { timeout: 10000 });
+                await new Promise(r => setTimeout(r, 500));
+                if (!(await device.isConnected())) throw new Error("Device disconnected before discovery.");
                 await device.discoverAllServicesAndCharacteristics();
                 const services = await device.services();
                 const service = services.find(s => s.uuid.toLowerCase().includes(TRANSFER_SERVICE_UUID.toLowerCase()));
@@ -909,6 +939,8 @@ const truncateToSafeBytes = (str, maxBytes) => {
                 try { await device.requestMTU(512); } catch (e) { console.warn("MTU ignored"); }
                 await new Promise(r => setTimeout(r, 500));
 
+                await new Promise(r => setTimeout(r, 500));
+                if (!(await device.isConnected())) throw new Error("Device disconnected before discovery.");
                 await device.discoverAllServicesAndCharacteristics();
                 const services = await device.services();
                 const service = services.find(s => s.uuid.toLowerCase().includes(TRANSFER_SERVICE_UUID.toLowerCase()));
@@ -1075,6 +1107,8 @@ const truncateToSafeBytes = (str, maxBytes) => {
     async sendReturnPing(remoteAddress, finalLedger) {
         try {
             const device = await this.manager.connectToDevice(remoteAddress, { timeout: 5000 });
+            await new Promise(r => setTimeout(r, 500));
+            if (!(await device.isConnected())) throw new Error("Device disconnected before discovery.");
             await device.discoverAllServicesAndCharacteristics();
             
             const payload = `ACK:SYNC_LEDGER:${JSON.stringify(finalLedger)}__EOF__`;
@@ -1095,6 +1129,8 @@ const truncateToSafeBytes = (str, maxBytes) => {
         try {
             // Reconnect to send the inventory list
             const device = await this.manager.connectToDevice(remoteAddress, { timeout: 5000 });
+            await new Promise(r => setTimeout(r, 500));
+            if (!(await device.isConnected())) throw new Error("Device disconnected before discovery.");
             await device.discoverAllServicesAndCharacteristics();
             
             // Format: REQ : DELTA : CARD_ID : [ARRAY_OF_SIGNATURES]

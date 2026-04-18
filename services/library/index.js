@@ -22,6 +22,8 @@ import { UFC_CARDS, WBO_CARDS } from './Vol16_Combat';
 import { F1_CARDS } from './Vol17_Racing';
 import { NHL_CARDS } from './Vol18_NHL';
 import { NASCAR_CARDS, LEMANS_CARDS } from './Vol19_Racing';
+import { FOOD_CARDS } from './Vol20_Nutrition_Foods';
+import { NUTRIENT_CARDS } from './Vol21_Nutrition_Nutrients';
 
 
 // Aggregates all "Civilization" knowledge
@@ -38,6 +40,8 @@ export const MASTER_LIBRARY = [
   ...SCIENCE_CARDS,
   ...CIVICS_CARDS,
   ...LOGIC_CARDS,
+  ...FOOD_CARDS,
+  ...NUTRIENT_CARDS,
 ];
 
 export const funLibrary = [

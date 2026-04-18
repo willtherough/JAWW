@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
-import { Modal, View, Text, TouchableOpacity, StyleSheet, SafeAreaView, FlatList, TextInput } from 'react-native';
+import { Modal, View, Text, TouchableOpacity, StyleSheet, SafeAreaView, FlatList, TextInput, Alert } from 'react-native';
 import QRCode from 'react-native-qrcode-svg';
+import UmpireDashboardService from '../services/UmpireDashboardService';
 
 export default function UmpireEventModal({ visible, onClose, event, onBegin, onEnd, leaderboard }) {
   const [eventPhase, setEventPhase] = useState('begin'); // 'begin' or 'last_call'
@@ -23,6 +24,8 @@ export default function UmpireEventModal({ visible, onClose, event, onBegin, onE
 
   const handleEnd = () => {
     onEnd();
+    UmpireDashboardService.stopServer();
+    setWebUrl(null);
     setEventPhase('begin'); // Reset for next time
   };
   
@@ -65,6 +68,7 @@ export default function UmpireEventModal({ visible, onClose, event, onBegin, onE
               <TouchableOpacity onPress={() => handleBegin(subject || 'General')} style={styles.beginButton}>
                 <Text style={styles.beginButtonText}>Begin Event & Broadcast</Text>
               </TouchableOpacity>
+
               <TouchableOpacity onPress={onClose} style={styles.closeButton}>
                 <Text style={styles.closeButtonText}>Cancel</Text>
               </TouchableOpacity>
@@ -135,6 +139,42 @@ const styles = StyleSheet.create({
   beginButtonText: {
     color: '#00FF00',
     fontSize: 18,
+    fontWeight: 'bold',
+    fontFamily: 'Courier New',
+  },
+  webButton: {
+    backgroundColor: '#0F172A',
+    paddingVertical: 12,
+    paddingHorizontal: 30,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#38BDF8',
+    marginBottom: 20,
+  },
+  webButtonText: {
+    color: '#38BDF8',
+    fontSize: 16,
+    fontWeight: 'bold',
+    fontFamily: 'Courier New',
+  },
+  urlBox: {
+    backgroundColor: '#020617',
+    padding: 15,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#38BDF8',
+    marginBottom: 20,
+    alignItems: 'center',
+  },
+  urlLabel: {
+    color: '#94A3B8',
+    fontSize: 12,
+    fontFamily: 'Courier New',
+    marginBottom: 5,
+  },
+  urlText: {
+    color: '#38BDF8',
+    fontSize: 16,
     fontWeight: 'bold',
     fontFamily: 'Courier New',
   },

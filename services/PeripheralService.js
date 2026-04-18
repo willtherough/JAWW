@@ -218,9 +218,13 @@ const onCardReceived = async (requestString) => {
         isUmpirePacket = true;
         console.log(`>> GATT SERVER: Initial Umpire chunk caught from ${global.umpireSender}.`);
     } else if (global.umpireBuffer && global.umpireBuffer.length > 0) {
-        global.umpireBuffer += request;
-        isUmpirePacket = true;
-        console.log(`>> GATT SERVER: Umpire chunk appended. Buffer size: ${global.umpireBuffer.length}`);
+        if (!request.startsWith('REQ:')) {
+            global.umpireBuffer += request;
+            isUmpirePacket = true;
+            console.log(`>> GATT SERVER: Umpire chunk appended. Buffer size: ${global.umpireBuffer.length}`);
+        } else {
+            console.log(`>> GATT SERVER: Dropping cross-talk packet from Umpire buffer.`);
+        }
     }
 
     if (isUmpirePacket) {
@@ -257,8 +261,12 @@ const onCardReceived = async (requestString) => {
         isSyncPacket = true;
         console.log(`>> GATT SERVER: Sync Ledger start caught.`);
     } else if (global.syncBuffer && global.syncBuffer.length > 0) {
-        global.syncBuffer += request;
-        isSyncPacket = true;
+        if (!request.startsWith('REQ:')) {
+            global.syncBuffer += request;
+            isSyncPacket = true;
+        } else {
+            console.log(`>> GATT SERVER: Dropping cross-talk packet from Sync buffer.`);
+        }
     }
 
     if (isSyncPacket) {
@@ -376,6 +384,8 @@ const onCardReceived = async (requestString) => {
     }
 };
 
+import WifiMeshService from './WifiMeshService';
+
 const sendCardInChunks = async (deviceId, card) => {
     const actualCard = card || deviceId; 
 
@@ -390,9 +400,24 @@ const sendCardInChunks = async (deviceId, card) => {
     const totalSize = cardString.length;
     console.log(">> GATT SERVER: Sending", actualCard.title || "Error Object", "Size:", totalSize);
 
+    let payloadToChunk = cardString;
+
+    // === NEW SMART ROUTER (VECTOR 1) ===
+    if (totalSize > 2500) { 
+        console.log(">> SMART ROUTER: Payload exceeds 2.5KB threshold. Attempting Wi-Fi Override...");
+        try {
+            const { ip, port } = await WifiMeshService.hostPayload(cardString);
+            payloadToChunk = `REQ:WIFI_UPGRADE:${ip}:${port}`;
+            console.log(`>> SMART ROUTER: Override successful. Redirecting requestor to TCP ${ip}:${port}`);
+        } catch (e) {
+            console.warn(">> SMART ROUTER: Wi-Fi Override failed (No Hotspot/LAN). Falling back strictly to BLE MTU.", e.message);
+        }
+    }
+
+    const transmitSize = payloadToChunk.length;
     let offset = 0;
-    while (offset < totalSize) {
-        const chunk = cardString.slice(offset, offset + CHUNK_SIZE);
+    while (offset < transmitSize) {
+        const chunk = payloadToChunk.slice(offset, offset + CHUNK_SIZE);
         try {
             await SourceGattModule.sendData(chunk);
         } catch (e) {
