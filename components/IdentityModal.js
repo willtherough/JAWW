@@ -1,9 +1,9 @@
 import React, { useState, useEffect } from 'react';
-import { Modal, View, Text, TextInput, TouchableOpacity, StyleSheet, ScrollView, Alert, SafeAreaView, Clipboard } from 'react-native';
+import { Modal, View, Text, TextInput, TouchableOpacity, StyleSheet, ScrollView, Alert, SafeAreaView, Clipboard, FlatList } from 'react-native';
 import QRCode from 'react-native-qrcode-svg';
 import { saveProfile } from '../model/Storage';
 import { createIdentityCard } from '../model/Schema';
-import { getOperatorStats } from '../model/database';
+import { getOperatorStats, getAllCards } from '../model/database';
 
 export default function IdentityModal({ 
   visible, onClose, profile, onReset, onClearLibrary, onStartNewEvent
@@ -16,7 +16,16 @@ export default function IdentityModal({
   const [backgroundPro, setBackgroundPro] = useState('');
   const [backgroundHobby, setBackgroundHobby] = useState('');
   const [backgroundFit, setBackgroundFit] = useState('');
+  const [age, setAge] = useState('');
+  const [weight, setWeight] = useState('');
+  const [height, setHeight] = useState('');
+  const [schedule, setSchedule] = useState({ mon: '', tue: '', wed: '', thu: '', fri: '', sat: '', sun: '' });
   const [stats, setStats] = useState(null);
+  
+  // --- WORKOUT PICKER STATE ---
+  const [workoutCards, setWorkoutCards] = useState([]);
+  const [activePickerDay, setActivePickerDay] = useState(null);
+  const [pickerVisible, setPickerVisible] = useState(false);
 
   useEffect(() => {
     const fetchStats = async () => {
@@ -33,11 +42,26 @@ export default function IdentityModal({
       setBackgroundPro(profile.background_pro || '');
       setBackgroundHobby(profile.background_hobby || '');
       setBackgroundFit(profile.background_fit || '');
+      setAge(profile.age?.toString() || '');
+      setWeight(profile.weight?.toString() || '');
+      setHeight(profile.height?.toString() || '');
+      setSchedule(profile.schedule || { mon: '', tue: '', wed: '', thu: '', fri: '', sat: '', sun: '' });
       setMode('view');
       setIsEditing(false);
       fetchStats();
+      fetchWorkoutCards();
     }
-  }, [visible, profile]);
+  }, [profile, visible]);
+
+  const fetchWorkoutCards = async () => {
+    const allCards = await getAllCards();
+    const workouts = allCards.filter(c => 
+       c.topic === 'human/fitness' || 
+       (c.subject && c.subject.toUpperCase().includes('WORKOUT')) ||
+       (c.title && c.title.toUpperCase().includes('WORKOUT'))
+    );
+    setWorkoutCards(workouts);
+  };
 
   const handleSave = async () => {
     const updatedProfile = {
@@ -46,6 +70,10 @@ export default function IdentityModal({
       background_pro: backgroundPro,
       background_hobby: backgroundHobby,
       background_fit: backgroundFit,
+      age: parseInt(age, 10) || null,
+      weight: parseInt(weight, 10) || null,
+      height: parseInt(height, 10) || null,
+      schedule
     };
     try {
       await saveProfile(updatedProfile);
@@ -79,7 +107,11 @@ export default function IdentityModal({
       genesis_date: genesisDate,
       background_pro: backgroundPro,
       background_hobby: backgroundHobby,
-      background_fit: backgroundFit
+      background_fit: backgroundFit,
+      age,
+      weight,
+      height,
+      schedule
     }, 
     profile.publicKey
   );
@@ -150,12 +182,50 @@ export default function IdentityModal({
                       <Text style={styles.label}>PHYSICAL CAPABILITY</Text>
                       <TextInput style={styles.input} value={backgroundFit} onChangeText={setBackgroundFit} multiline placeholder="Enter fitness regime, capabilities..." placeholderTextColor="#005500"/>
 
+                      <Text style={styles.label}>BIOMETRICS (AGE, WEIGHT LBS, HEIGHT IN)</Text>
+                      <View style={{flexDirection: 'row', gap: 10, marginBottom: 15}}>
+                        <TextInput style={[styles.input, {flex: 1, marginBottom: 0, minHeight: 40}]} value={age} onChangeText={setAge} keyboardType="numeric" placeholder="Age" placeholderTextColor="#005500"/>
+                        <TextInput style={[styles.input, {flex: 1, marginBottom: 0, minHeight: 40}]} value={weight} onChangeText={setWeight} keyboardType="numeric" placeholder="Weight" placeholderTextColor="#005500"/>
+                        <TextInput style={[styles.input, {flex: 1, marginBottom: 0, minHeight: 40}]} value={height} onChangeText={setHeight} keyboardType="numeric" placeholder="Height" placeholderTextColor="#005500"/>
+                      </View>
+
+                      <Text style={styles.label}>7-DAY WORKOUT SCHEDULE</Text>
+                      {['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'].map(day => (
+                          <View key={day} style={{flexDirection: 'row', alignItems: 'center', marginBottom: 8}}>
+                              <Text style={{color: '#00FF00', width: 40, textTransform: 'uppercase', fontFamily: 'Courier New'}}>{day}</Text>
+                              <TouchableOpacity 
+                                style={[styles.input, {flex: 1, marginBottom: 0, paddingVertical: 12, justifyContent: 'center', minHeight: 45}]}
+                                onPress={() => {
+                                  setActivePickerDay(day);
+                                  setPickerVisible(true);
+                                }}
+                              >
+                                <Text style={{color: schedule[day] ? '#FFF' : '#005500', fontFamily: 'Courier New'}}>
+                                  {schedule[day] || "Tap to select workout..."}
+                                </Text>
+                              </TouchableOpacity>
+                          </View>
+                      ))}
+
                       <TouchableOpacity onPress={handleSave} style={styles.saveBtn}>
                         <Text style={styles.saveText}>PATCH RECORDS</Text>
                       </TouchableOpacity>
                     </View>
                   ) : (
                     <View style={styles.intelBlocks}>
+                      <View style={styles.intelBlock}>
+                        <Text style={styles.intelHeader}>// BIOMETRICS</Text>
+                        <Text style={styles.intelContent}>Age: {age || "N/A"} | Weight: {weight ? weight + " lbs" : "N/A"} | Height: {height ? height + " in" : "N/A"}</Text>
+                      </View>
+                      <View style={styles.intelBlock}>
+                        <Text style={styles.intelHeader}>// 7-DAY SCHEDULE</Text>
+                        {['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'].map(day => (
+                            <Text key={day} style={styles.intelContent}>
+                                <Text style={{color: '#f59e0b'}}>{day.toUpperCase()}: </Text>
+                                {schedule[day] || "REST"}
+                            </Text>
+                        ))}
+                      </View>
                       <View style={styles.intelBlock}>
                         <Text style={styles.intelHeader}>// PROFESSIONAL ASSETS</Text>
                         <Text style={styles.intelContent}>{backgroundPro || "CLASSIFIED"}</Text>
@@ -210,6 +280,52 @@ export default function IdentityModal({
             )}
           </ScrollView>
         </SafeAreaView>
+
+        {/* WORKOUT PICKER OVERLAY */}
+        {pickerVisible && (
+            <View style={{
+                position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+                backgroundColor: 'rgba(0,0,0,0.85)', justifyContent: 'center', padding: 20, zIndex: 999, elevation: 10
+            }}>
+                <View style={{
+                    backgroundColor: '#0F172A', padding: 20, borderRadius: 8, borderWidth: 1, borderColor: '#10B981', flexShrink: 1, maxHeight: '80%'
+                }}>
+                    <Text style={styles.pickerTitle}>SELECT WORKOUT FOR {activePickerDay?.toUpperCase()}</Text>
+                    
+                    <TouchableOpacity 
+                        style={[styles.pickerItem, {borderBottomWidth: 1, borderColor: '#334155'}]} 
+                        onPress={() => {
+                            setSchedule({...schedule, [activePickerDay]: 'REST'});
+                            setPickerVisible(false);
+                        }}
+                    >
+                        <Text style={[styles.pickerItemText, {color: '#F59E0B'}]}>[ REST DAY ]</Text>
+                    </TouchableOpacity>
+
+                    <FlatList 
+                        data={workoutCards}
+                        keyExtractor={(item, index) => item?.id?.toString() || index.toString()}
+                        renderItem={({item}) => (
+                            <TouchableOpacity 
+                                style={styles.pickerItem}
+                                onPress={() => {
+                                    setSchedule({...schedule, [activePickerDay]: item.title});
+                                    setPickerVisible(false);
+                                }}
+                            >
+                                <Text style={styles.pickerItemText}>• {item.title}</Text>
+                            </TouchableOpacity>
+                        )}
+                        ListEmptyComponent={<Text style={styles.emptyPickerText}>No Workout cards found in Ledger.</Text>}
+                    />
+                    
+                    <TouchableOpacity style={styles.pickerCancelBtn} onPress={() => setPickerVisible(false)}>
+                        <Text style={styles.pickerCancelText}>ABORT</Text>
+                    </TouchableOpacity>
+                </View>
+            </View>
+        )}
+
       </View>
     </Modal>
   );
@@ -440,4 +556,10 @@ const styles = StyleSheet.create({
     borderColor: '#222',
     marginBottom: 20,
   },
+  pickerTitle: { color: '#10B981', fontFamily: 'Courier New', fontWeight: 'bold', fontSize: 16, marginBottom: 15, textAlign: 'center' },
+  pickerItem: { paddingVertical: 15, paddingHorizontal: 15, borderWidth: 1, borderColor: '#334155', borderRadius: 8, marginBottom: 10, backgroundColor: '#1E293B' },
+  pickerItemText: { color: '#F8FAFC', fontFamily: 'Courier New', fontSize: 14, fontWeight: 'bold' },
+  emptyPickerText: { color: '#94A3B8', fontFamily: 'Courier New', fontStyle: 'italic', textAlign: 'center', marginVertical: 20 },
+  pickerCancelBtn: { marginTop: 20, padding: 15, alignItems: 'center', backgroundColor: '#111', borderRadius: 6, borderWidth: 1, borderColor: '#EF4444' },
+  pickerCancelText: { color: '#EF4444', fontFamily: 'Courier New', fontWeight: 'bold', letterSpacing: 1 }
 });

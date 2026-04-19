@@ -65,7 +65,7 @@ const CardItem = ({ item, onPress, onLongPress, onTrustNode, activeUmpireEvent, 
 
             {/* --- BODY: Author / Origin Text --- */}
             <Text style={styles.authorText}>
-                {item?.forkedFrom ? `Original Author: ${item.originalAuthor || 'Unknown'}` : `Author: ${item.author || item.genesis?.author_id || 'Unknown'}`}
+                {item?.forkedFrom ? `Original Author: ${item.originalAuthor || 'Unknown'}` : `Author: ${(item.genesis && item.genesis.author_handle) || item.author || (item.genesis && item.genesis.author_id) || 'Unknown'}`}
             </Text>
 
             {/* --- NEW: EVENT INDICATOR BADGE --- */}

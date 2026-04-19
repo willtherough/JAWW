@@ -189,3 +189,55 @@ export const verifyChain = (card) => {
   console.log("✅ Chain Verification Successful: All signatures are valid. Truth verified.");
   return true;
 };
+
+// --- PHASE 1: END-TO-END ENCRYPTION (ECDH) ---
+// Used by the Bluetooth layer to secure in-flight JSON payloads.
+
+export const generateEphemeralKeyPair = () => {
+    // Generate a temporary Curve25519 keypair for the GATT session
+    const keyPair = nacl.box.keyPair();
+    return {
+        publicKey: util.encodeBase64(keyPair.publicKey),
+        secretKey: util.encodeBase64(keyPair.secretKey)
+    };
+};
+
+export const encryptPayload = (jsonPayload, mySecretKeyBase64, peerPublicKeyBase64) => {
+    try {
+        const nonce = nacl.randomBytes(nacl.box.nonceLength);
+        const messageBytes = util.decodeUTF8(JSON.stringify(jsonPayload));
+        const mySecretKeyBytes = util.decodeBase64(mySecretKeyBase64);
+        const peerPublicKeyBytes = util.decodeBase64(peerPublicKeyBase64);
+        
+        const encryptedBytes = nacl.box(messageBytes, nonce, peerPublicKeyBytes, mySecretKeyBytes);
+        
+        return {
+            cipherText: util.encodeBase64(encryptedBytes),
+            nonce: util.encodeBase64(nonce)
+        };
+    } catch (e) {
+        console.error(">> E2EE: Encryption Failed", e);
+        return null;
+    }
+};
+
+export const decryptPayload = (cipherTextBase64, nonceBase64, mySecretKeyBase64, peerPublicKeyBase64) => {
+    try {
+        const cipherTextBytes = util.decodeBase64(cipherTextBase64);
+        const nonceBytes = util.decodeBase64(nonceBase64);
+        const mySecretKeyBytes = util.decodeBase64(mySecretKeyBase64);
+        const peerPublicKeyBytes = util.decodeBase64(peerPublicKeyBase64);
+        
+        const decryptedBytes = nacl.box.open(cipherTextBytes, nonceBytes, peerPublicKeyBytes, mySecretKeyBytes);
+        
+        if (!decryptedBytes) {
+            throw new Error("Failed to open box (keys/nonce mismatch)");
+        }
+        
+        const jsonStr = util.encodeUTF8(decryptedBytes);
+        return JSON.parse(jsonStr);
+    } catch (e) {
+        console.error(">> E2EE: Decryption Failed", e);
+        return null;
+    }
+};

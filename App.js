@@ -41,6 +41,7 @@ import QRCode from 'react-native-qrcode-svg';
 import SyncStatusScreen from './components/SyncStatusScreen';
 import AnimatedQRTransfer from './components/AnimatedQRTransfer';
 import AirGapScanner from './components/AirGapScanner';
+import RosettaVerificationModal from './components/RosettaVerificationModal';
 import UmpireDashboardService from './services/UmpireDashboardService';
 
 const decodeVaultBitmask = (bitmask) => {
@@ -603,6 +604,8 @@ export default function App() {
   const [isProfileVisible, setIsProfileVisible] = useState(false);
   const [isOracleVisible, setIsOracleVisible] = useState(false);
   const [isRosettaVisible, setIsRosettaVisible] = useState(false);
+  const [isRosettaVerificationVisible, setIsRosettaVerificationVisible] = useState(false);
+  const [currentScannedReceipt, setCurrentScannedReceipt] = useState(null);
   const [isTrustedModalVisible, setIsTrustedModalVisible] = useState(false);
   const [trustedSources, setTrustedSources] = useState([]);
   const [remoteCatalog, setRemoteCatalog] = useState(null);
@@ -1340,49 +1343,46 @@ export default function App() {
     setIsRosettaVisible(false);
     
     if (receipt && receipt.items && receipt.items.length > 0) {
-      // Process the first item as a proof of concept for the stress test
-      const firstItem = receipt.items[0];
-      
-      Alert.alert(
-        "Receipt OCR Data Acquired",
-        `Parsed line item:\nStore: ${receipt.store}\nItem: "${firstItem.rawText}"\nPrice: $${firstItem.price}`,
-        [
-          { text: "Dismiss", style: "cancel" },
-          { 
-            text: "Map to 'Walnuts' (Master Card)", 
-            onPress: () => {
-              // 1. Create the ROSETTA_MAP Translation Card
-              const translationCard = {
-                title: `Rosetta: ${receipt.store} -> ${firstItem.rawText}`,
-                topic: 'human/general',
-                subject: `ROSETTA_MAP:${receipt.store.toUpperCase()}:${firstItem.rawText.toUpperCase()}`,
-                body: "Walnuts" // Points to the Master Card ID/Title
-              };
-              handleCreateCard(translationCard);
-
-              // 2. Create the PURCHASE Card for the Fridge / Mesh Economy
-              setTimeout(() => {
-                const purchaseCard = {
-                  title: `Purchase: Walnuts`,
-                  topic: 'human/finance',
-                  subject: `PURCHASE:WALNUTS`,
-                  body: JSON.stringify({
-                    store: receipt.store,
-                    rawText: firstItem.rawText,
-                    price: firstItem.price,
-                    quantity: firstItem.quantity,
-                    date: receipt.date
-                  })
-                };
-                handleCreateCard(purchaseCard);
-                
-                Alert.alert("Rosetta Pipeline Complete", `Created Translation and Purchase records. These are now broadcasting via the mesh! Check your FRIDGE tab.`);
-              }, 1000); // 1-second delay to ensure nonce generation doesn't collide
-            }
-          }
-        ]
-      );
+      setCurrentScannedReceipt(receipt);
+      setIsRosettaVerificationVisible(true);
     }
+  };
+
+  const handleRosettaVerifyComplete = (verifiedItems) => {
+    setIsRosettaVerificationVisible(false);
+    const store = currentScannedReceipt?.store || "UNKNOWN";
+    
+    verifiedItems.forEach((item, index) => {
+      // 1. Create Translation Card
+      const translationCard = {
+        title: `Rosetta: ${store} -> ${item.rawText}`,
+        topic: 'human/general',
+        subject: `ROSETTA_MAP:${store.toUpperCase()}:${item.rawText.toUpperCase()}`,
+        body: item.trueIngredient 
+      };
+      handleCreateCard(translationCard);
+
+      // 2. Create Fridge / Purchase Card
+      setTimeout(() => {
+        const purchaseCard = {
+          title: `${item.weight} ${item.unit} ${item.trueIngredient}`,
+          topic: 'human/nutrition',
+          subject: `FRIDGE:${item.trueIngredient.toUpperCase().replace(/\s+/g, '_')}`,
+          body: JSON.stringify({
+            store: store,
+            rawText: item.rawText,
+            trueIngredient: item.trueIngredient,
+            price: item.price,
+            weight: item.weight,
+            unit: item.unit,
+            date: currentScannedReceipt?.date || new Date().toISOString()
+          })
+        };
+        handleCreateCard(purchaseCard);
+      }, index * 1000 + 500); // Stagger to prevent nonce collision
+    });
+    
+    Alert.alert("Fridge Updated", `Successfully processed ${verifiedItems.length} items into your biological inventory.`);
   };
 
   const handleAddToGroceryList = (card) => {
@@ -2874,7 +2874,9 @@ export default function App() {
 
         // Only update the UI if this is the most recent keystroke/query
         if (isMounted) {
-          setCards(results);
+          // Hide system logs from the main dashboard views
+          const filteredResults = results.filter(c => c.subject !== 'NUTRITION_LOG');
+          setCards(filteredResults);
         }
       } catch (error) {
         console.error(">> ORACLE ERROR: SQLite Search failed:", error);
@@ -3431,10 +3433,17 @@ export default function App() {
         />
       )}
       
-      <RosettaScannerModal
+      <AirGapScanner
         visible={isRosettaVisible}
         onClose={() => setIsRosettaVisible(false)}
-        onScanComplete={handleRosettaScan}
+        onTransferComplete={handleRosettaScan}
+      />
+
+      <RosettaVerificationModal
+        visible={isRosettaVerificationVisible}
+        receipt={currentScannedReceipt}
+        onClose={() => setIsRosettaVerificationVisible(false)}
+        onVerifyComplete={handleRosettaVerifyComplete}
       />
 
       {/* Military Air-Gap Transmitter Modal */}

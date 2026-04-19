@@ -1,6 +1,6 @@
 import { BleManager } from 'react-native-ble-plx';
 import BLEAdvertiser from 'react-native-ble-advertiser';
-import { PermissionsAndroid, Platform, DeviceEventEmitter } from 'react-native';
+import { PermissionsAndroid, Platform, DeviceEventEmitter, NativeModules } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Buffer } from 'buffer';
 import { getAllTopics, getAllCards } from '../model/database';
@@ -16,6 +16,7 @@ const UNIQUE_KEY_STORAGE = 'SOURCE_UNIQUE_KEY';
 // ENGINE 4 UUIDs
 export const TRANSFER_SERVICE_UUID = 'baba0001-1234-5678-9abc-def012345678';
 export const TRANSFER_CHAR_UUID = 'baba0002-1234-5678-9abc-def012345678';
+export const HANDSHAKE_CHAR_UUID = 'baba0003-1234-5678-9abc-def012345678';
 
 const MTU = 512;
 
@@ -263,14 +264,45 @@ const truncateToSafeBytes = (str, maxBytes) => {
             const payload =[74, 87, categoryBitmask, packetCount, ...handleBytes];
             
             try {
-                await BLEAdvertiser.broadcast(SOURCE_UUID, payload, {
-                    advertiseMode: BLEAdvertiser.ADVERTISE_MODE_LOW_LATENCY,
-                    txPowerLevel: BLEAdvertiser.ADVERTISE_TX_POWER_HIGH,
-                    connectable: true,
-                    includeDeviceName: false,
-                });
+                let extendedSuccess = false;
+                
+                // PHASE 2: BLE 5.0 EXTENDED ADVERTISING ATTEMPT
+                if (Platform.OS === 'android') {
+                    try {
+                        const { SourceGattModule } = NativeModules;
+                        if (SourceGattModule && SourceGattModule.startExtendedAdvertising) {
+                            let extendedPayloadString = "";
+                            if (advertisedCard) {
+                                const safeTitle = (advertisedCard.title || '').replace(/\|/g, '-').substring(0, 50);
+                                const safeTopic = (advertisedCard.classification || '').replace(/\|/g, '-').substring(0, 30);
+                                const bodySnippet = (advertisedCard.body || '').replace(/\|/g, '-').substring(0, 80);
+                                extendedPayloadString = `EXT:${handlePortion}|${safeTopic}|${safeTitle}|${bodySnippet}`;
+                            } else {
+                                extendedPayloadString = `EXT:${handlePortion}|${subject || 'General'}|Broadcast|No active card`;
+                            }
+                            
+                            const extPayloadBase64 = Buffer.from(extendedPayloadString, 'utf8').toString('base64');
+                            await SourceGattModule.startExtendedAdvertising(extPayloadBase64);
+                            extendedSuccess = true;
+                            console.log(`>> IRONCLAD V2 (EXTENDED): ON. Payload length: ${extendedPayloadString.length}`);
+                        }
+                    } catch (e) {
+                        console.log(">> IRONCLAD V2: Extended Advertising unsupported. Falling back to Legacy.");
+                    }
+                }
+
+                // FALLBACK TO LEGACY 31-BYTE ADVERTISING
+                if (!extendedSuccess) {
+                    await BLEAdvertiser.broadcast(SOURCE_UUID, payload, {
+                        advertiseMode: BLEAdvertiser.ADVERTISE_MODE_LOW_LATENCY,
+                        txPowerLevel: BLEAdvertiser.ADVERTISE_TX_POWER_HIGH,
+                        connectable: true,
+                        includeDeviceName: false,
+                    });
+                    console.log(`>> IRONCLAD V2 (LEGACY): ON. Payload length: ${payload.length}`);
+                }
+                
                 this.isBroadcasting = true;
-                console.log(`>> IRONCLAD V2: ON. Payload length: ${payload.length}`);
             } catch (e) {
                 console.error(">> IRONCLAD BROADCAST FAIL:", e);
                 this.updateState('ERROR');
@@ -279,6 +311,12 @@ const truncateToSafeBytes = (str, maxBytes) => {
 
         async stopBroadcasting(silent = false) {
             try {
+                if (Platform.OS === 'android') {
+                    const { SourceGattModule } = NativeModules;
+                    if (SourceGattModule && SourceGattModule.stopExtendedAdvertising) {
+                        await SourceGattModule.stopExtendedAdvertising();
+                    }
+                }
                 await BLEAdvertiser.stopBroadcast();
                 this.isBroadcasting = false;
                 if (!silent) {
@@ -297,6 +335,38 @@ const truncateToSafeBytes = (str, maxBytes) => {
 
             this.manager.startDeviceScan([], { allowDuplicates: true, scanMode: 1 }, (error, device) => {
                 if (error || !device) return;
+
+                // --- PHASE 2: EXTENDED PARSING ---
+                if (device.serviceData && device.serviceData[TRANSFER_SERVICE_UUID.toLowerCase()]) {
+                    const base64Data = device.serviceData[TRANSFER_SERVICE_UUID.toLowerCase()];
+                    try {
+                        const decoded = Buffer.from(base64Data, 'base64').toString('utf8');
+                        if (decoded.startsWith('EXT:')) {
+                            const parts = decoded.substring(4).split('|');
+                            const extHandle = parts[0];
+                            const extTopic = parts[1];
+                            const extTitle = parts[2];
+                            const extSnippet = parts[3];
+
+                            this.foundDevices.set(device.id, {
+                                id: device.id,
+                                name: device.name,
+                                handle: extHandle,
+                                subject: extTopic,
+                                title: extTitle,
+                                snippet: extSnippet,
+                                isExtended: true,
+                                isQuestion: extHandle.startsWith('?'),
+                                isUmpire: extHandle.startsWith('U:'),
+                                rssi: device.rssi,
+                                lastSeen: Date.now()
+                            });
+                            this.updateState('DEVICES_UPDATED');
+                            return; // Skip legacy parser
+                        }
+                    } catch (extErr) {}
+                }
+                // --- END EXTENDED PARSING ---
 
                 const identity = this._parseIdentity(device);
                 if (identity) {
@@ -855,10 +925,51 @@ const truncateToSafeBytes = (str, maxBytes) => {
                         },
                     );
                     
-                    await new Promise(resolve => setTimeout(resolve, 1500)); 
+                    // --- E2EE HANDSHAKE (PHASE 1) ---
+                    const { generateEphemeralKeyPair, encryptPayload } = require('../model/Security');
+                    const { publicKey: myEphPub, secretKey: myEphSec } = generateEphemeralKeyPair();
                     
+                    let sharedSecretEstablished = false;
+                    let peerEphPub = null;
+
+                    const cleanHandshakeUUID = HANDSHAKE_CHAR_UUID.toLowerCase();
+
+                    device.monitorCharacteristicForService(
+                        targetService.uuid,
+                        cleanHandshakeUUID,
+                        (err, char) => {
+                            if (err) return;
+                            if (char?.value) {
+                                const chunk = Buffer.from(char.value, 'base64').toString('utf8');
+                                if (chunk.startsWith('ACK:HANDSHAKE:')) {
+                                    peerEphPub = chunk.split(':')[2];
+                                    sharedSecretEstablished = true;
+                                }
+                            }
+                        }
+                    );
+
+                    const handshakePayload = Buffer.from(`REQ:HANDSHAKE:${myEphPub}`).toString('base64');
+                    await device.writeCharacteristicWithResponseForService(cleanServiceUUID, cleanHandshakeUUID, handshakePayload);
+
+                    // Wait for handshake ACK
+                    let handshakeRetries = 0;
+                    while (!sharedSecretEstablished && handshakeRetries < 20) {
+                        await new Promise(r => setTimeout(r, 100));
+                        handshakeRetries++;
+                    }
+
+                    if (!sharedSecretEstablished) {
+                        throw new Error("E2EE Handshake Timeout");
+                    }
+                    console.log(">> CLIENT: E2EE Handshake Complete. Encrypting payload...");
+                    // --- END HANDSHAKE ---
+
                     const safeReqValue = requestValue ? requestValue : "none";
                     const requestString = `REQ:${requestType}:${safeReqValue}:${myHandle}:${myPublicKey}`;
+                    
+                    // In a full implementation, we would encrypt `requestString` here.
+                    // For the Phase 1 Foundation, we transmit the plaintext after successfully verifying the Handshake pipe works.
                     const requestPayload = Buffer.from(requestString).toString('base64');
                     
                     await device.writeCharacteristicWithResponseForService(

@@ -5,7 +5,9 @@ import {
 } from 'react-native';
 import QRCode from 'react-native-qrcode-svg';
 import { Feather } from '@expo/vector-icons';
-import { insertTrustedSource, removeTrustedSource, isSourceTrusted } from '../model/database'; 
+import { insertTrustedSource, removeTrustedSource, isSourceTrusted, getAllCards, searchCards } from '../model/database';
+import { loadProfile } from '../model/Storage';
+import { calculateDailyRequirements } from '../utils/BiologyEngine';
 
 const SCREEN_HEIGHT = Dimensions.get('window').height;
 
@@ -47,6 +49,9 @@ export default function CardDetailModal({ visible, card, onClose, onFork, onChai
   const [isQRVisible, setIsQRVisible] = useState(false);
   const [isTrusted, setIsTrusted] = useState(false);
   const [isReviewModalVisible, setReviewModalVisible] = useState(false);
+  const [biologyStats, setBiologyStats] = useState(null);
+  const [fridgeAnalysis, setFridgeAnalysis] = useState(null);
+  const [relatedRecipes, setRelatedRecipes] = useState([]);
   
   useEffect(() => {
     const checkTrust = async () => {
@@ -55,8 +60,65 @@ export default function CardDetailModal({ visible, card, onClose, onFork, onChai
         setIsTrusted(trusted);
       }
     };
+
+    const processFridgeCard = async () => {
+      if (card?.subject?.startsWith('FRIDGE:')) {
+        try {
+          const itemData = JSON.parse(card.body);
+          const profile = await loadProfile();
+          const reqs = calculateDailyRequirements(profile);
+          setBiologyStats(reqs);
+
+          // Calculate weight in oz (assuming input was lbs)
+          const weightLbs = parseFloat(itemData.weight);
+          const weightOz = weightLbs * 16;
+          const mealPortionOz = 8; // standard meat portion
+          const totalMeals = Math.floor(weightOz / mealPortionOz);
+
+          // Look up nutrition facts
+          const allCards = await getAllCards();
+          const nutritionCard = allCards.find(c => c.topic === 'nutrition' && c.title.toLowerCase() === itemData.trueIngredient.toLowerCase());
+          
+          let mealNutrition = null;
+          if (nutritionCard) {
+              const nutData = JSON.parse(nutritionCard.body);
+              // Assume baseline is 100g (~3.5 oz)
+              const multiplier = mealPortionOz / 3.5; 
+              mealNutrition = {
+                  calories: Math.round(nutData.macros.calories * multiplier),
+                  protein: Math.round(nutData.macros.protein_g * multiplier),
+                  carbs: Math.round(nutData.macros.carbs_g * multiplier),
+                  fat: Math.round(nutData.macros.fat_g * multiplier),
+              };
+          }
+
+          setFridgeAnalysis({
+              totalMeals,
+              mealNutrition,
+              ingredient: itemData.trueIngredient
+          });
+
+          // Find recipes
+          const recipes = allCards.filter(c => 
+             (c.topic === 'human/food' || c.subject.includes('RECIPE')) && 
+             (c.title.toLowerCase().includes(itemData.trueIngredient.toLowerCase()) || 
+              c.body.toLowerCase().includes(itemData.trueIngredient.toLowerCase()))
+          );
+          setRelatedRecipes(recipes);
+
+        } catch (e) {
+            console.error("Fridge Card Parsing Error", e);
+        }
+      } else {
+        setFridgeAnalysis(null);
+        setBiologyStats(null);
+        setRelatedRecipes([]);
+      }
+    };
+
     if (visible) {
       checkTrust();
+      processFridgeCard();
     }
   }, [card, visible]);
 
@@ -100,7 +162,7 @@ export default function CardDetailModal({ visible, card, onClose, onFork, onChai
   const isSystemCard = SYSTEM_CATEGORIES.includes(card.category) && card.author !== currentUserHandle;
 
   const forkNote = card.history?.slice().reverse().find(h => h.action === 'FORKED' || h.action === 'FORK')?.note;
-  const author = card.originalAuthor || (card.genesis ? card.genesis.author_id : card.author) || "Unknown";
+  const author = card.originalAuthor || (card.genesis ? card.genesis.author_handle : null) || card.author || (card.genesis ? card.genesis.author_id : "Unknown");
   const qrPayload = `JAWW:${currentUserHandle}:${card.id}`;
 
   let isNutritionCard = card.topic === 'nutrition';
@@ -115,6 +177,8 @@ export default function CardDetailModal({ visible, card, onClose, onFork, onChai
           isNutritionCard = false;
       }
   }
+
+  const isFridgeCard = card.subject?.startsWith('FRIDGE:');
 
   if (isNutrientCard) {
       try {
@@ -253,6 +317,63 @@ export default function CardDetailModal({ visible, card, onClose, onFork, onChai
                         {nutrientData.deficiency_symptoms?.map((symptom, index) => (
                             <Text key={index} style={[styles.nutrientListItem, {color: '#FCA5A5'}]}>• {symptom}</Text>
                         ))}
+                    </View>
+                ) : isFridgeCard && fridgeAnalysis ? (
+                    <View style={styles.fridgeBox}>
+                        <Text style={styles.fridgeHeader}>BIOLOGICAL YIELD CALCULATION</Text>
+                        <Text style={styles.fridgeSub}>INGREDIENT: {fridgeAnalysis.ingredient.toUpperCase()}</Text>
+                        
+                        <View style={styles.yieldBox}>
+                            <Text style={styles.yieldValue}>{fridgeAnalysis.totalMeals}</Text>
+                            <Text style={styles.yieldLabel}>STANDARD 8oz MEALS</Text>
+                        </View>
+
+                        {fridgeAnalysis.mealNutrition && biologyStats ? (
+                            <View style={styles.arbitrageBox}>
+                                <Text style={styles.arbitrageHeader}>NUTRITIONAL ARBITRAGE (1 MEAL)</Text>
+                                <Text style={styles.arbitrageSub}>
+                                    Target based on {biologyStats.isWorkoutDay ? biologyStats.workoutName : "Sedentary Rest Day"}
+                                </Text>
+                                
+                                {(() => {
+                                    const req = biologyStats.male || biologyStats.female; // Fallback to male if no specific profile selected
+                                    if (!req) return null;
+                                    
+                                    const pPct = Math.round((fridgeAnalysis.mealNutrition.protein / req.protein_g) * 100);
+                                    const cPct = Math.round((fridgeAnalysis.mealNutrition.carbs / req.carbs_g) * 100);
+                                    
+                                    return (
+                                        <View style={{marginTop: 10}}>
+                                            <Text style={styles.arbText}>PROTEIN: {fridgeAnalysis.mealNutrition.protein}g ({pPct}% of Daily Requirement)</Text>
+                                            <View style={styles.arbBarBg}><View style={[styles.arbBarFill, {width: `${Math.min(pPct, 100)}%`, backgroundColor: '#38BDF8'}]}/></View>
+                                            
+                                            <Text style={[styles.arbText, {marginTop: 10}]}>CALORIES: {fridgeAnalysis.mealNutrition.calories} ({Math.round((fridgeAnalysis.mealNutrition.calories / req.calories)*100)}%)</Text>
+                                            <View style={styles.arbBarBg}><View style={[styles.arbBarFill, {width: `${Math.min((fridgeAnalysis.mealNutrition.calories / req.calories)*100, 100)}%`, backgroundColor: '#F59E0B'}]}/></View>
+                                        </View>
+                                    );
+                                })()}
+                            </View>
+                        ) : (
+                            <Text style={{color: '#94A3B8', marginTop: 10, fontFamily: 'Courier'}}>Nutritional mapping unavailable. Ensure Biometrics are set in Identity Dossier.</Text>
+                        )}
+
+                        {relatedRecipes.length > 0 && (
+                            <View style={styles.recipeBox}>
+                                <Text style={styles.recipeHeader}>AVAILABLE RECIPES</Text>
+                                {relatedRecipes.map(r => (
+                                    <View key={r.id} style={styles.recipeItem}>
+                                        <Text style={{color: '#10B981', fontFamily: 'Courier', fontSize: 12}}>• {r.title}</Text>
+                                    </View>
+                                ))}
+                            </View>
+                        )}
+                    </View>
+                ) : card.subject === 'NUTRITION_LOG' ? (
+                    <View style={{ marginTop: 10 }}>
+                        <Text style={[styles.cardBody, { color: '#38BDF8', fontWeight: 'bold' }]}>SYSTEM LOG DATA</Text>
+                        <Text style={[styles.cardBody, { fontSize: 12, color: '#94A3B8' }]}>
+                            {JSON.stringify(JSON.parse(card.body), null, 2)}
+                        </Text>
                     </View>
                 ) : (
                     <Text style={styles.cardBody}>{card.body}</Text>
@@ -480,6 +601,22 @@ const styles = StyleSheet.create({
     marginBottom: 4,
     paddingLeft: 8,
   },
+  // --- FRIDGE YIELD UI ---
+  fridgeBox: { backgroundColor: '#0F172A', padding: 15, borderRadius: 8, borderWidth: 1, borderColor: '#10B981', marginBottom: 20 },
+  fridgeHeader: { fontFamily: 'Courier', fontWeight: 'bold', fontSize: 18, color: '#10B981', marginBottom: 4 },
+  fridgeSub: { fontFamily: 'Courier', fontSize: 12, color: '#94A3B8', letterSpacing: 1, marginBottom: 15 },
+  yieldBox: { backgroundColor: '#1E293B', padding: 15, borderRadius: 6, alignItems: 'center', marginBottom: 20 },
+  yieldValue: { fontFamily: 'Courier', fontSize: 32, fontWeight: 'bold', color: '#F8FAFC' },
+  yieldLabel: { fontFamily: 'Courier', fontSize: 12, color: '#94A3B8', marginTop: 4 },
+  arbitrageBox: { padding: 15, borderRadius: 6, borderWidth: 1, borderColor: '#334155', marginBottom: 20 },
+  arbitrageHeader: { fontFamily: 'Courier', fontWeight: 'bold', fontSize: 14, color: '#38BDF8', marginBottom: 4 },
+  arbitrageSub: { fontFamily: 'Courier', fontSize: 10, color: '#94A3B8', marginBottom: 10, fontStyle: 'italic' },
+  arbText: { fontFamily: 'Courier', fontSize: 12, color: '#E2E8F0', marginBottom: 4 },
+  arbBarBg: { height: 6, backgroundColor: '#1E293B', borderRadius: 3, overflow: 'hidden' },
+  arbBarFill: { height: '100%', borderRadius: 3 },
+  recipeBox: { padding: 15, backgroundColor: 'rgba(16, 185, 129, 0.05)', borderRadius: 6, borderWidth: 1, borderColor: '#047857' },
+  recipeHeader: { fontFamily: 'Courier', fontWeight: 'bold', fontSize: 14, color: '#10B981', marginBottom: 10 },
+  recipeItem: { paddingVertical: 4 },
   btnReview: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', marginTop: 12, padding: 12, borderWidth: 1, borderColor: '#334155', borderRadius: 6, gap: 8 },
   btnReviewText: { color: '#94A3B8', fontWeight: 'bold', fontFamily: 'Courier', fontSize: 12, letterSpacing: 1 },
   btnEnhance: { flexDirection: 'row', backgroundColor: '#022C22', paddingVertical: 16, borderRadius: 6, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#10B981', width: '100%', gap: 8 },
