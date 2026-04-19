@@ -1,5 +1,5 @@
 JAWW: The Offline Internet Built on Human Trust
-"We are going to John Connor the f** out of the future."*
+"We are going to John Connor the hell out of the future."*
 
 The Problem
 If you look at the current trajectory of the web, three alarming trends are accelerating toward an unavoidable collision:
