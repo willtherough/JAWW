@@ -7,7 +7,8 @@ import { insertTrustedSource, fetchTrustedSources } from './database';
 
 const KEYS = {
   LIBRARY: 'THE_SOURCE_LIBRARY_V2',
-  PROFILE: 'THE_SOURCE_PROFILE_V2'
+  PROFILE: 'THE_SOURCE_PROFILE_V2',
+  NEWS_FREQUENCIES: 'JAWW_NEWS_FREQUENCIES'
 };
 
 // --- TRUSTED SOURCES (SQLite) ---
@@ -113,4 +114,23 @@ export const calculateExpertise = (cards, userHandle) => {
   });
 
   return scores;
+};
+
+// --- NEWS FREQUENCIES ---
+
+export const loadNewsFrequencies = async () => {
+  try {
+    const jsonValue = await AsyncStorage.getItem(KEYS.NEWS_FREQUENCIES);
+    return jsonValue != null ? JSON.parse(jsonValue) : [];
+  } catch(e) {
+    return [];
+  }
+};
+
+export const saveNewsFrequencies = async (frequencies) => {
+  try {
+    await AsyncStorage.setItem(KEYS.NEWS_FREQUENCIES, JSON.stringify(frequencies));
+  } catch (e) {
+    console.error("Failed to save news frequencies", e);
+  }
 };

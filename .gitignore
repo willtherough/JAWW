@@ -38,3 +38,20 @@ yarn-error.*
 
 # generated native folders
 /ios
+/android
+
+# Large Android / Gradle caches
+.gradle-local/
+android/.gradle-local/
+android/.gradle/
+.gradle/
+
+# Build artifacts
+android/app/build/
+ios/build/
+
+# Heavy Machine Learning Models
+android/app/src/main/assets/ggml-hexagon/
+*.so
+*.gguf
+*.bin

@@ -2,7 +2,7 @@ import React, { useRef, useEffect } from 'react';
 import { Text, TouchableOpacity, StyleSheet, Animated, View } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 
-const CardItem = ({ item, onPress, onLongPress, onTrustNode, activeUmpireEvent, manualUmpireSubmit }) => {
+const CardItem = ({ item, onPress, onLongPress, onTrustNode, activeUmpireEvent, manualUmpireSubmit, onVerifyClaim }) => {
     if (!item) return null;
 
     const hopCount = parseInt(item?.hops || 0, 10);
@@ -35,10 +35,13 @@ const CardItem = ({ item, onPress, onLongPress, onTrustNode, activeUmpireEvent, 
     });
 
     const isTrusted = item?.is_trusted === 1;
+    const isJawwSeed = item?.author_id === 'SYSTEM' || item?.genesis?.author_handle === 'SystemOperator' || item?.genesis?.author_id === 'SYSTEM' || item?.genesis?.author_handle === 'JAWW_SYSTEM';
+
+    const isTrustedNews = isTrusted && item?.topic === 'intel/news';
 
     return (
         <TouchableOpacity
-            style={styles.cardContainer}
+            style={[styles.cardContainer, isTrustedNews && { borderColor: '#F59E0B', borderWidth: 1 }]}
             onPress={onPress}
             onLongPress={onLongPress}
             activeOpacity={0.8}
@@ -46,7 +49,7 @@ const CardItem = ({ item, onPress, onLongPress, onTrustNode, activeUmpireEvent, 
             {/* --- HEADER: Title & Animated Hops --- */}
             <View style={styles.header}>
                 <View style={styles.titleContainer}>
-                    <Text style={styles.cardTitle} numberOfLines={1}>{item?.title || 'UNKNOWN INTEL'}</Text>
+                    <Text style={styles.cardTitle} numberOfLines={3}>{item?.title || 'UNKNOWN INTEL'}</Text>
                     {item?.forkedFrom && (
                         <View style={styles.forkBadge}>
                             <Text style={styles.forkText}>⑂ FORKED</Text>
@@ -64,9 +67,17 @@ const CardItem = ({ item, onPress, onLongPress, onTrustNode, activeUmpireEvent, 
             </View>
 
             {/* --- BODY: Author / Origin Text --- */}
-            <Text style={styles.authorText}>
-                {item?.forkedFrom ? `Original Author: ${item.originalAuthor || 'Unknown'}` : `Author: ${item.author || item.genesis?.author_id || 'Unknown'}`}
-            </Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
+                <Text style={styles.authorText}>
+                    {item?.forkedFrom ? `Original Author: ${item.originalAuthor || 'Unknown'}` : `Author: ${(item.genesis && item.genesis.author_handle) || item.author || (item.genesis && item.genesis.author_id) || 'Unknown'}`}
+                </Text>
+                {item?.domainBoost > 0 && (
+                    <View style={styles.expertiseBadge}>
+                        <Feather name="trending-up" size={10} color="#F59E0B" style={{ marginRight: 2 }} />
+                        <Text style={styles.expertiseText}>NETWORK EXPERTISE: {item.domainBoost}x</Text>
+                    </View>
+                )}
+            </View>
 
             {/* --- NEW: EVENT INDICATOR BADGE --- */}
             {(item.event_id || (activeUmpireEvent && item.subject && item.subject === activeUmpireEvent.subject)) && (
@@ -89,12 +100,30 @@ const CardItem = ({ item, onPress, onLongPress, onTrustNode, activeUmpireEvent, 
                 </TouchableOpacity>
             )}
 
+            {/* --- NEW: VERIFY CLAIM BUTTON --- */}
+            {item.subject === 'CLAIM' && onVerifyClaim && (
+                <TouchableOpacity 
+                    onPress={() => onVerifyClaim(item)}
+                    style={{ marginTop: 10, backgroundColor: '#A855F720', borderColor: '#A855F7', borderWidth: 1, paddingVertical: 8, paddingHorizontal: 16, borderRadius: 6, alignItems: 'center', flexDirection: 'row', justifyContent: 'center' }}
+                >
+                    <Feather name="check-circle" size={16} color="#A855F7" style={{ marginRight: 8 }} />
+                    <Text style={{ color: '#A855F7', fontWeight: 'bold', fontSize: 12, fontFamily: 'Courier' }}>VERIFY CLAIM</Text>
+                </TouchableOpacity>
+            )}
+
             {/* --- FOOTER: Verification & Trust --- */}
             <View style={styles.footer}>
-                {isTrusted ? (
+                {isJawwSeed ? (
+                    <View style={[styles.statusBadge, { borderColor: '#38BDF8', backgroundColor: '#0EA5E920' }]}>
+                        <Feather name="anchor" size={12} color="#38BDF8" />
+                        <Text style={[styles.verifiedText, { color: '#38BDF8' }]}>JAWW</Text>
+                    </View>
+                ) : isTrusted ? (
                     <View style={styles.statusBadge}>
-                        <Feather name="shield" size={12} color="#10B981" />
-                        <Text style={styles.verifiedText}>VERIFIED OP</Text>
+                        <Feather name="shield" size={12} color={item?.topic === 'intel/news' ? '#F59E0B' : '#10B981'} />
+                        <Text style={[styles.verifiedText, item?.topic === 'intel/news' && { color: '#F59E0B' }]}>
+                            {item?.topic === 'intel/news' ? 'TRUSTED NEWS SOURCE' : 'VERIFIED OP'}
+                        </Text>
                     </View>
                 ) : (
                     <View style={styles.unverifiedContainer}>
@@ -177,9 +206,25 @@ const styles = StyleSheet.create({
     },
     authorText: {
         color: '#94A3B8',
-        fontSize: 12,
+        fontSize: 10,
         fontFamily: 'Courier',
-        marginBottom: 14,
+        textTransform: 'uppercase',
+    },
+    expertiseBadge: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        backgroundColor: '#451A03',
+        paddingHorizontal: 6,
+        paddingVertical: 2,
+        borderRadius: 4,
+        borderWidth: 1,
+        borderColor: '#F59E0B',
+    },
+    expertiseText: {
+        color: '#F59E0B',
+        fontSize: 9,
+        fontWeight: 'bold',
+        fontFamily: 'Courier',
     },
     footer: {
         flexDirection: 'row',

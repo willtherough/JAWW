@@ -5,6 +5,7 @@ import nacl from 'tweetnacl';
 import util from 'tweetnacl-util';
 import * as bip39 from 'bip39';
 import { Buffer } from 'buffer';
+import { INITIAL_SEEDS } from '../utils/SeedData';
 
 if (typeof global.Buffer === 'undefined') {
   global.Buffer = Buffer;
@@ -102,8 +103,11 @@ export const signData = async (dataInput) => {
 };
 
 // 3. VERIFY SIGNATURE (The Auditor)
-export const verifySignature = (dataInput, signature, authorPublicKey) => {
-  if (authorPublicKey === 'SYSTEM') return true; // System cards are bundled, not signed
+export const verifySignature = (dataInput, signature, authorPublicKey, allowSystemBypass = false) => {
+  if (authorPublicKey === 'SYSTEM') {
+    if (allowSystemBypass) return true;
+    return false; // Cannot artificially pass a system signature validation over the air
+  }
 
   try {
     const messageString = typeof dataInput === 'string' 
@@ -122,8 +126,25 @@ export const verifySignature = (dataInput, signature, authorPublicKey) => {
 };
 
 // 4. VERIFY ENTIRE CHAIN (The "Lean Chain" Auditor)
-export const verifyChain = (card) => {
-  if (card?.genesis?.author_id === 'SYSTEM') return true; // Bypass for bundled DB seeds
+export const verifyChain = (card, allowSystemBypass = false) => {
+  if (card?.genesis?.author_id === 'SYSTEM') {
+    if (allowSystemBypass) return true; // Local boot loading
+
+    // THE TRUST ANCHOR: Check if the card perfectly matches the hardcoded App Bundle dictionary
+    const genuineSeed = INITIAL_SEEDS.find(seed => seed.id === card.id);
+    if (!genuineSeed) {
+      console.error(">> SECURITY: Rejected Unknown SYSTEM Card ID over Mesh.");
+      return false;
+    }
+    
+    if (card.genesis.title !== genuineSeed.title || card.genesis.body !== genuineSeed.body) {
+      console.error(">> SECURITY: REJECTED! Mesh SYSTEM Card payload was tampered with.");
+      return false;
+    }
+
+    // It perfectly matches our read-only dictionary! The genesis block is valid.
+    // Now we must verify the rest of the chain (the forks!)
+  }
 
   if (!card || !card.genesis || !card.genesis.signature || !card.genesis.author_id) {
     console.error("Chain Verification Aborted: Invalid Genesis Block.");
@@ -133,11 +154,16 @@ export const verifyChain = (card) => {
   // Step 1: Reconstruct the exact Genesis state (signature was 'null' when signed)
   const genesisBlock = { ...card.genesis, signature: null };
   
-  const isGenesisValid = verifySignature(
-    genesisBlock, 
-    card.genesis.signature, 
-    card.genesis.author_id
-  );
+  // If it's a genuine SYSTEM card over the mesh, we skip genesis signature validation (since it has none)
+  let isGenesisValid = true;
+  if (card.genesis.author_id !== 'SYSTEM') {
+    isGenesisValid = verifySignature(
+      genesisBlock, 
+      card.genesis.signature, 
+      card.genesis.author_id,
+      allowSystemBypass
+    );
+  }
 
   if (!isGenesisValid) {
     console.error("Chain Verification Failed: Genesis signature is invalid.");
@@ -188,4 +214,56 @@ export const verifyChain = (card) => {
 
   console.log("✅ Chain Verification Successful: All signatures are valid. Truth verified.");
   return true;
+};
+
+// --- PHASE 1: END-TO-END ENCRYPTION (ECDH) ---
+// Used by the Bluetooth layer to secure in-flight JSON payloads.
+
+export const generateEphemeralKeyPair = () => {
+    // Generate a temporary Curve25519 keypair for the GATT session
+    const keyPair = nacl.box.keyPair();
+    return {
+        publicKey: util.encodeBase64(keyPair.publicKey),
+        secretKey: util.encodeBase64(keyPair.secretKey)
+    };
+};
+
+export const encryptPayload = (jsonPayload, mySecretKeyBase64, peerPublicKeyBase64) => {
+    try {
+        const nonce = nacl.randomBytes(nacl.box.nonceLength);
+        const messageBytes = util.decodeUTF8(JSON.stringify(jsonPayload));
+        const mySecretKeyBytes = util.decodeBase64(mySecretKeyBase64);
+        const peerPublicKeyBytes = util.decodeBase64(peerPublicKeyBase64);
+        
+        const encryptedBytes = nacl.box(messageBytes, nonce, peerPublicKeyBytes, mySecretKeyBytes);
+        
+        return {
+            cipherText: util.encodeBase64(encryptedBytes),
+            nonce: util.encodeBase64(nonce)
+        };
+    } catch (e) {
+        console.error(">> E2EE: Encryption Failed", e);
+        return null;
+    }
+};
+
+export const decryptPayload = (cipherTextBase64, nonceBase64, mySecretKeyBase64, peerPublicKeyBase64) => {
+    try {
+        const cipherTextBytes = util.decodeBase64(cipherTextBase64);
+        const nonceBytes = util.decodeBase64(nonceBase64);
+        const mySecretKeyBytes = util.decodeBase64(mySecretKeyBase64);
+        const peerPublicKeyBytes = util.decodeBase64(peerPublicKeyBase64);
+        
+        const decryptedBytes = nacl.box.open(cipherTextBytes, nonceBytes, peerPublicKeyBytes, mySecretKeyBytes);
+        
+        if (!decryptedBytes) {
+            throw new Error("Failed to open box (keys/nonce mismatch)");
+        }
+        
+        const jsonStr = util.encodeUTF8(decryptedBytes);
+        return JSON.parse(jsonStr);
+    } catch (e) {
+        console.error(">> E2EE: Decryption Failed", e);
+        return null;
+    }
 };

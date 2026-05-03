@@ -20,17 +20,5 @@ allprojects {
   }
 }
 
-// --- THE BOUNCER ---
-subprojects { subproject ->
-    afterEvaluate {
-        if (subproject.hasProperty('android')) {
-            subproject.android {
-                compileSdkVersion 35
-            }
-        }
-    }
-}
-// -------------------
-
 apply plugin: "expo-root-project"
 apply plugin: "com.facebook.react.rootproject"

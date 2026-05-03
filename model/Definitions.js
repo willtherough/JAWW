@@ -7,6 +7,7 @@ export const TOPICS = [
   { id: 'fit', label: 'Fitness' },
   { id: 'pro', label: 'Professional' },
   { id: 'fun', label: 'Fun' },
+  { id: 'intel/news', label: 'News' },
   { id: 'general', label: 'General' },
 ];
 

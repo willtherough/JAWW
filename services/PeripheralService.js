@@ -1,4 +1,4 @@
-import { NativeModules, DeviceEventEmitter } from 'react-native';
+import { NativeModules, DeviceEventEmitter, AppState } from 'react-native';
 import { Buffer } from 'buffer';
 import { searchCards, fetchCards, getCardById, fetchTrustedSources, isBlocked } from '../model/database';
 import { verifySignature, getOrGenerateKeys, signData } from '../model/Security';
@@ -11,6 +11,13 @@ const MAX_HANDSHAKE_SIZE = 600;
 import { getAdvertisedCard } from './BroadcastState';
 
 let cardReceivedListener = null;
+let handshakeListener = null;
+
+// Global session for the current BLE connection
+export const PeripheralE2EESession = {
+    centralPublicKey: null,
+    mySecretKey: null
+};
 
 // ==========================================
 // --- NEW: HANDSHAKE STATE & INITIATOR ---
@@ -27,6 +34,31 @@ const initiateHandshake = async (card, header) => {
         console.error(">> GATT SERVER: Failed to send header:", e);
     }
 };
+
+const onDeviceHandshake = async (requestString) => {
+    console.log(`>> E2EE HANDSHAKE RECEIVED: ${requestString}`);
+    if (requestString.startsWith('REQ:HANDSHAKE:')) {
+        try {
+            const parts = requestString.split(':');
+            const centralPublicKey = parts[2];
+
+            const { generateEphemeralKeyPair } = require('../model/Security');
+            const { publicKey, secretKey } = generateEphemeralKeyPair();
+
+            PeripheralE2EESession.centralPublicKey = centralPublicKey;
+            PeripheralE2EESession.mySecretKey = secretKey;
+
+            const responsePayload = `ACK:HANDSHAKE:${publicKey}`;
+            console.log(`>> GATT SERVER: Responding with Ephemeral Key`);
+            
+            if (SourceGattModule.sendHandshakeResponse) {
+                await SourceGattModule.sendHandshakeResponse(responsePayload);
+            }
+        } catch (e) {
+            console.error(">> E2EE HANDSHAKE FAILED:", e);
+        }
+    }
+};
 // ==========================================
 
 const onCardReceived = async (requestString) => {
@@ -35,17 +67,42 @@ const onCardReceived = async (requestString) => {
         return;
     }
 
-    if (requestString.startsWith('REQ:SYNC_PING:')) {
-        const parts = requestString.split(':');
-        const cardId = parts[2];
-        const senderHandle = parts[3];
-        const targetString = parts[4] || '';
-        const targets = targetString.split(',');
+    // ==========================================
+    // --- PHASE 3: THE PASSIVE FIREWALL ---
+    // ==========================================
+    const isBackground = AppState.currentState.match(/inactive|background/);
+    const isUmpireRequest = requestString.startsWith('REQ:UMPIRE'); 
+    const isSyncRequest = requestString.startsWith('REQ:SYNC_PING') || requestString.startsWith('REQ:NEWS_PULL') || requestString.startsWith('REQ:CHALLENGE') || requestString.startsWith('REQ:DELTA') || requestString.startsWith('ACK:SYNC_LEDGER');
 
-        console.log(`>> GATT SERVER: Caught Sync Ping for ${cardId} from ${senderHandle}`);
-        
-        // Pass to App.js to see if we are on the target list
-        DeviceEventEmitter.emit('onSyncPingReceived', { cardId, senderHandle, targets });
+    if (isBackground && !isUmpireRequest && !isSyncRequest && !requestString.startsWith('HANDSHAKE')) {
+        console.log(">> PASSIVE FIREWALL: Blocked untrusted/general request while in background.", requestString);
+        return;
+    }
+    // ==========================================
+
+    if (requestString.startsWith('REQ:NEWS_PULL:') || requestString.startsWith('REQ:SYNC_PING:')) {
+        let actualPingString = requestString;
+        let newsTags = [];
+
+        if (requestString.startsWith('REQ:NEWS_PULL:')) {
+            const splitReq = requestString.split('|');
+            const pullHeader = splitReq[0];
+            newsTags = pullHeader.replace('REQ:NEWS_PULL:', '').split(',');
+            actualPingString = splitReq[1]; // The standard REQ:SYNC_PING follows
+        }
+
+        if (actualPingString && actualPingString.startsWith('REQ:SYNC_PING:')) {
+            const parts = actualPingString.split(':');
+            const cardId = parts[2];
+            const senderHandle = parts[3];
+            const targetString = parts[4] || '';
+            const targets = targetString.split(',');
+
+            console.log(`>> GATT SERVER: Caught Sync Ping for ${cardId} from ${senderHandle}`);
+            
+            // Pass to App.js to see if we are on the target list. Include newsTags.
+            DeviceEventEmitter.emit('onSyncPingReceived', { cardId, senderHandle, targets, newsTags });
+        }
         return;
     }
 
@@ -252,6 +309,15 @@ const onCardReceived = async (requestString) => {
     }
 
     // ==========================================
+    // SYNAPSE GAME ENGINE ROUTING
+    // ==========================================
+    if (request.startsWith('REQ:BATTLE:')) {
+        console.log(`>> GATT SERVER: Intercepted Combat Request. Routing to Synapse...`);
+        DeviceEventEmitter.emit('synapseCombatReceived', { payload: request });
+        return; // Halt standard processing
+    }
+
+    // ==========================================
     // MESH SYNC BUFFERING (CLEAN HANDOFF)
     // ==========================================
     let isSyncPacket = false;
@@ -442,6 +508,10 @@ const startServer = async () => {
         if (!cardReceivedListener) {
             cardReceivedListener = DeviceEventEmitter.addListener('onDeviceRequest', onCardReceived);
             console.log(">> PERIPHERAL SERVICE: Attached GATT knock listener.");
+        }
+        if (!handshakeListener) {
+            handshakeListener = DeviceEventEmitter.addListener('onDeviceHandshake', onDeviceHandshake);
+            console.log(">> PERIPHERAL SERVICE: Attached E2EE Handshake listener.");
         }
         try {
             const result = await SourceGattModule.startServer();

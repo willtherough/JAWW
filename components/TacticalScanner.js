@@ -56,10 +56,10 @@ export default function TacticalScanner({ devices, onNodeTap, isScanning }) {
             <View style={styles.gridOverlay} />
             
             <View style={styles.headerRow}>
-                <Text style={styles.titleText}>Content Offered Around Me</Text>
+                <Text style={styles.titleText}>Discover Nearby</Text>
                 <View style={styles.statusBadge}>
-                    <View style={[styles.statusDot, { backgroundColor: '#10B981' }]} />
-                    <Text style={styles.statusText}>{isScanning ? 'SCANNING' : 'Radar Active'}</Text>
+                    <View style={[styles.statusDot, { backgroundColor: '#38BDF8' }]} />
+                    <Text style={styles.statusText}>{isScanning ? 'SCANNING' : 'Discovery Active'}</Text>
                 </View>
             </View>
 
@@ -150,10 +150,9 @@ const styles = StyleSheet.create({
     },
     titleText: {
         color: '#F8FAFC',
-        fontFamily: 'Courier',
         fontWeight: 'bold',
-        fontSize: 12,
-        letterSpacing: 2,
+        fontSize: 14,
+        letterSpacing: 1,
     },
     statusBadge: {
         flexDirection: 'row',
@@ -167,7 +166,6 @@ const styles = StyleSheet.create({
     },
     statusText: {
         color: '#94A3B8',
-        fontFamily: 'Courier',
         fontSize: 10,
         fontWeight: 'bold',
     },
@@ -185,8 +183,8 @@ const styles = StyleSheet.create({
     scanLine: {
         width: '100%',
         height: 2,
-        backgroundColor: '#10B981', // Matrix Green
-        shadowColor: '#10B981',
+        backgroundColor: '#38BDF8', // Soft Blue
+        shadowColor: '#38BDF8',
         shadowOffset: { width: 0, height: 0 },
         shadowOpacity: 1,
         shadowRadius: 10,
@@ -217,8 +215,7 @@ const styles = StyleSheet.create({
     },
     nodeLabel: {
         color: '#F8FAFC',
-        fontFamily: 'Courier',
-        fontSize: 10,
+        fontSize: 12,
         fontWeight: 'bold',
         marginTop: 4,
         textShadowColor: 'rgba(0,0,0,0.8)',
@@ -227,7 +224,6 @@ const styles = StyleSheet.create({
     },
     nodeRssi: {
         color: '#64748B',
-        fontFamily: 'Courier',
-        fontSize: 8,
+        fontSize: 10,
     }
 });

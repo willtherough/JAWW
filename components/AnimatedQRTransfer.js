@@ -48,9 +48,9 @@ export default function AnimatedQRTransfer({ payload, onClose }) {
 
     return (
         <View style={styles.container}>
-            <Text style={styles.warningTitle}>EMCON PROTOCOL ACTIVE</Text>
+            <Text style={styles.warningTitle}>SHARE</Text>
             <Text style={styles.instructionText}>
-                Zero-Emission Air-Gap Transfer. Keep the scanner locked on this feed until transfer completes.
+                Scan this card to request it. Keep the scanner locked on this feed until transfer completes.
             </Text>
 
             <View style={styles.qrWrapper}>
@@ -86,7 +86,7 @@ const styles = StyleSheet.create({
         padding: 20,
     },
     warningTitle: {
-        color: '#ff0000',
+        color: '#10B981',
         fontFamily: 'Courier',
         fontSize: 22,
         fontWeight: 'bold',

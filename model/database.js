@@ -95,7 +95,7 @@ export const initDB = async () => {
       PRAGMA journal_mode = WAL;
       CREATE TABLE IF NOT EXISTS trusted_sources ( id INTEGER PRIMARY KEY NOT NULL, uid TEXT UNIQUE NOT NULL, handle TEXT NOT NULL, publicKey TEXT NOT NULL, timestamp TEXT NOT NULL );
       CREATE TABLE IF NOT EXISTS known_peers ( public_key TEXT PRIMARY KEY NOT NULL, handle TEXT NOT NULL, last_seen INTEGER );
-      CREATE TABLE IF NOT EXISTS cards ( id TEXT PRIMARY KEY NOT NULL, title TEXT, body TEXT, topic TEXT, subject TEXT, author_id TEXT, timestamp INTEGER, hops INTEGER DEFAULT 0, genesis TEXT, history TEXT, forkedFrom TEXT, depth_score INTEGER DEFAULT 0, hop_count INTEGER DEFAULT 0, network_reach INTEGER DEFAULT 1, parent_id TEXT, parent_hash TEXT, event_id TEXT );
+      CREATE TABLE IF NOT EXISTS cards ( id TEXT PRIMARY KEY NOT NULL, title TEXT, body TEXT, topic TEXT, subject TEXT, author_id TEXT, timestamp INTEGER, hops INTEGER DEFAULT 0, genesis TEXT, history TEXT, forkedFrom TEXT, depth_score INTEGER DEFAULT 0, hop_count INTEGER DEFAULT 0, network_reach INTEGER DEFAULT 1, parent_id TEXT, parent_hash TEXT, event_id TEXT, citations TEXT );
       CREATE TABLE IF NOT EXISTS transfers ( id INTEGER PRIMARY KEY NOT NULL, cardId TEXT NOT NULL, recipientHandle TEXT NOT NULL, timestamp TEXT NOT NULL );
       CREATE TABLE IF NOT EXISTS local_blocklist (public_key TEXT PRIMARY KEY NOT NULL, blocked_at TEXT NOT NULL, reason TEXT);
       CREATE TABLE IF NOT EXISTS quarantined_hashes (hash TEXT PRIMARY KEY NOT NULL, quarantined_at TEXT NOT NULL);
@@ -167,6 +167,12 @@ export const initDB = async () => {
       try {
         await db.execAsync(`ALTER TABLE cards ADD COLUMN depth_score INTEGER DEFAULT 0;`);
         console.log(">> MIGRATION: Added depth_score to cards");
+      } catch (e) { /* Silently ignore */ }
+
+      // 8. Add citations column
+      try {
+        await db.execAsync(`ALTER TABLE cards ADD COLUMN citations TEXT;`);
+        console.log(">> MIGRATION: Added citations to cards");
       } catch (e) { /* Silently ignore */ }
     };
 
@@ -315,10 +321,11 @@ export const fetchCards = async (limit = 15, offset = 0, filters = {}) => {
       if (filters.activeTab === 'created') {
         whereClauses.push('c.author_id = ?');
         params.push(filters.profileHandle);
-      } else { // 'learned' tab
+      } else if (filters.activeTab === 'learned') { 
         whereClauses.push('(c.author_id != ? OR c.author_id IS NULL)');
         params.push(filters.profileHandle);
       }
+      // If 'all', do not add an author filter.
     }
 
     // --- Phase 1: The Guardrail ---
@@ -347,7 +354,7 @@ export const fetchCards = async (limit = 15, offset = 0, filters = {}) => {
         baseQuery += ' WHERE ' + whereClauses.join(' AND ');
       }
 
-      baseQuery += ` ORDER BY is_trusted DESC, c.depth_score DESC, c.hops DESC, c.timestamp DESC LIMIT ? OFFSET ?`;
+      baseQuery += ` ORDER BY c.depth_score DESC, c.hops DESC, c.timestamp DESC LIMIT ? OFFSET ?`;
       params.push(limit, offset);
 
       const results = await db.getAllAsync(baseQuery, params);
@@ -370,7 +377,7 @@ export const fetchCards = async (limit = 15, offset = 0, filters = {}) => {
       if (whereClauses.length > 0) {
         baseQuery += ' WHERE ' + whereClauses.join(' AND ');
       }
-      baseQuery += ` ORDER BY is_trusted DESC, c.depth_score DESC, c.hops DESC, c.timestamp DESC LIMIT ? OFFSET ?`;
+      baseQuery += ` ORDER BY c.depth_score DESC, c.hops DESC, c.timestamp DESC LIMIT ? OFFSET ?`;
       params.push(limit, offset);
       const results = await db.getAllAsync(baseQuery, params);
       return results.map(card => ({
@@ -427,49 +434,86 @@ export const fetchCards = async (limit = 15, offset = 0, filters = {}) => {
         history: typeof card.history === 'string' ? JSON.parse(card.history || '[]') : (card.history || [])
       }));
 
-    } else { // This handles the 'Learned' tab
-      const learnedCardsRaw = await db.getAllAsync(
-        `SELECT * FROM cards WHERE (author_id != ? OR author_id IS NULL) ORDER BY depth_score DESC, hops DESC, timestamp DESC`,
-        [filters.profileHandle]
-      );
+    } else { // This handles 'all' or 'learned'
+      const allCardsRaw = await db.getAllAsync(`
+        WITH VerifierWeight AS (
+            SELECT author_id, (SUM(hops) + COUNT(id)) as network_weight
+            FROM cards
+            WHERE author_id IS NOT NULL AND author_id != 'SYSTEM'
+            GROUP BY author_id
+        ),
+        VerifiedClaims AS (
+            SELECT c.author_id as claimant, c.topic, v.author_id as verifier
+            FROM cards v
+            JOIN cards c ON json_extract(v.genesis, '$.target_card_id') = c.id
+            WHERE v.subject = 'VERIFICATION' AND c.subject = 'CLAIM'
+        ),
+        RepStats AS (
+            SELECT vc.claimant as author_id,
+                   SUM(CASE WHEN vc.topic LIKE '%fitness%' OR vc.topic LIKE '%medical%' THEN vw.network_weight ELSE 0 END) as fitness_rep,
+                   SUM(CASE WHEN vc.topic LIKE '%nutrition%' THEN vw.network_weight ELSE 0 END) as nutrition_rep,
+                   SUM(CASE WHEN vc.topic LIKE '%food%' OR vc.topic LIKE '%cooking%' OR vc.topic LIKE '%nutrition%' THEN vw.network_weight ELSE 0 END) as culinary_rep,
+                   SUM(CASE WHEN vc.topic LIKE '%edu%' THEN vw.network_weight ELSE 0 END) as edu_rep,
+                   SUM(CASE WHEN vc.topic LIKE '%pro%' THEN vw.network_weight ELSE 0 END) as pro_rep
+            FROM VerifiedClaims vc
+            JOIN VerifierWeight vw ON vc.verifier = vw.author_id
+            GROUP BY vc.claimant
+        )
+        SELECT c.*,
+               CASE WHEN ts.publicKey IS NOT NULL OR c.author_id = '${filters.profileHandle || ''}' THEN 1 ELSE 0 END AS is_trusted,
+               COALESCE(rs.fitness_rep, 0) as fitness_rep,
+               COALESCE(rs.nutrition_rep, 0) as nutrition_rep,
+               COALESCE(rs.culinary_rep, 0) as culinary_rep,
+               COALESCE(rs.edu_rep, 0) as edu_rep,
+               COALESCE(rs.pro_rep, 0) as pro_rep
+        FROM cards c
+        LEFT JOIN trusted_sources ts ON c.author_id = ts.publicKey
+        LEFT JOIN RepStats rs ON c.author_id = rs.author_id
+      `);
 
-      // Priority 1: Human Transfers
-      let humanTransfers = learnedCardsRaw.filter(c => c.author_id !== 'SYSTEM');
-      if (shouldShuffle) {
-        humanTransfers.sort(() => 0.5 - Math.random());
-      }
+      // 1. Calculate dynamic sorting score based on Domain-Specific Expertise
+      const scoredCards = allCardsRaw.map(card => {
+        let domainBoost = 0;
+        const safeTopic = (card.topic || '').toLowerCase();
+        
+        if (safeTopic.includes('fitness') || safeTopic.includes('medical') || card.subject === 'WORKOUT_LOG') {
+            domainBoost = card.fitness_rep || 0;
+        } else if (safeTopic.includes('food') || safeTopic.includes('cooking') || safeTopic.includes('recipe')) {
+            domainBoost = card.culinary_rep || 0; 
+        } else if (card.subject === 'NUTRITION_LOG' || safeTopic.includes('nutrition')) {
+            domainBoost = card.nutrition_rep || 0;
+        } else if (safeTopic.includes('edu')) {
+            domainBoost = card.edu_rep || 0;
+        } else if (safeTopic.includes('pro')) {
+            domainBoost = card.pro_rep || 0;
+        }
 
-      // Priority 2: JAWW Default/System cards
-      const systemCards = learnedCardsRaw.filter(c => c.author_id === 'SYSTEM');
-      const groupedSystem = systemCards.reduce((acc, card) => {
-        let topicFound = false;
-        const safeTopic = (card.topic || '').toLowerCase(); // Prevents strict-case bugs
-        for (const cat of categoryRank) {
-          if (safeTopic.includes(cat)) {
-            if (!acc[cat]) acc[cat] = [];
-            acc[cat].push(card);
-            topicFound = true;
-            break;
+        const baseScore = (card.depth_score || 0) + (card.hops || 1);
+        const finalScore = baseScore + (baseScore * domainBoost); // Boost it significantly
+
+        return {
+            ...card,
+            expertiseScore: finalScore,
+            domainBoost
+        };
+      });
+
+      // 2. Separate Human vs System
+      const humanTransfers = scoredCards.filter(c => c.author_id !== 'SYSTEM');
+      const systemCards = scoredCards.filter(c => c.author_id === 'SYSTEM');
+
+      // 3. Sort Human cards by expertiseScore DESC, then timestamp DESC
+      humanTransfers.sort((a, b) => {
+          if (b.expertiseScore !== a.expertiseScore) {
+              return b.expertiseScore - a.expertiseScore;
           }
-        }
-        if (!topicFound) {
-          if (!acc.other) acc.other = [];
-          acc.other.push(card);
-        }
-        return acc;
-      }, {});
+          return b.timestamp - a.timestamp;
+      });
 
-      let sortedSystemCards = [];
-      for (const cat of categoryRank) {
-        if (groupedSystem[cat]) {
-          sortedSystemCards.push(...groupedSystem[cat]);
-        }
-      }
-      if (groupedSystem.other) {
-        sortedSystemCards.push(...groupedSystem.other);
-      }
+      // 4. Sort System cards by timestamp DESC
+      systemCards.sort((a, b) => b.timestamp - a.timestamp);
 
-      const masterList = [...humanTransfers, ...sortedSystemCards];
+      const masterList = [...humanTransfers, ...systemCards];
       return masterList.slice(offset, offset + limit).map(card => ({
         ...card,
         genesis: typeof card.genesis === 'string' ? JSON.parse(card.genesis || '{}') : (card.genesis || {}),
@@ -488,7 +532,7 @@ export const getAllCards = async () => {
             SELECT c.*, CASE WHEN ts.publicKey IS NOT NULL THEN 1 ELSE 0 END AS is_trusted
             FROM cards c
             LEFT JOIN trusted_sources ts ON c.author_id = ts.publicKey
-            ORDER BY is_trusted DESC, c.depth_score DESC, c.hops DESC, c.timestamp DESC
+            ORDER BY c.depth_score DESC, c.hops DESC, c.timestamp DESC
         `);
     return results.map(card => ({
       ...card,
@@ -553,18 +597,19 @@ export const searchCards = async (query, filters = {}) => {
       return `"${sanitizedTerm}"*`;
     }).join(' OR ');
 
-    // 3. FIX THE FTS ALIAS: Use 'f MATCH' instead of 'fts_cards MATCH'
-    const whereClauses = ["f MATCH ?"];
+    // 3. FIX THE FTS ALIAS: Use 'fts_cards MATCH' instead of 'f MATCH' to satisfy SQLite 5 constraints
+    const whereClauses = ["fts_cards MATCH ?"];
     const params = [ftsQuery];
 
     if (filters.activeTab && filters.profileHandle) {
       if (filters.activeTab === 'created') {
         whereClauses.push('c.author_id = ?');
         params.push(filters.profileHandle);
-      } else {
+      } else if (filters.activeTab === 'learned') {
         whereClauses.push('(c.author_id != ? OR c.author_id IS NULL)');
         params.push(filters.profileHandle);
       }
+      // if activeTab === 'all', we don't restrict by author
     }
 
     // --- Phase 1: The Guardrail ---
@@ -583,21 +628,84 @@ export const searchCards = async (query, filters = {}) => {
     }
 
     const sql = `
-            SELECT c.*, CASE WHEN ts.publicKey IS NOT NULL THEN 1 ELSE 0 END AS is_trusted
-            FROM cards c 
-            JOIN fts_cards f ON c.rowid = f.rowid 
-            LEFT JOIN trusted_sources ts ON c.author_id = ts.publicKey
-            WHERE ${whereClauses.join(' AND ')}
-            ORDER BY is_trusted DESC, f.rank, c.depth_score DESC, c.hops DESC
-        `;
+        WITH VerifierWeight AS (
+            SELECT author_id, (SUM(hops) + COUNT(id)) as network_weight
+            FROM cards
+            WHERE author_id IS NOT NULL AND author_id != 'SYSTEM'
+            GROUP BY author_id
+        ),
+        VerifiedClaims AS (
+            SELECT c.author_id as claimant, c.topic, v.author_id as verifier
+            FROM cards v
+            JOIN cards c ON json_extract(v.genesis, '$.target_card_id') = c.id
+            WHERE v.subject = 'VERIFICATION' AND c.subject = 'CLAIM'
+        ),
+        RepStats AS (
+            SELECT vc.claimant as author_id,
+                   SUM(CASE WHEN vc.topic LIKE '%fitness%' OR vc.topic LIKE '%medical%' THEN vw.network_weight ELSE 0 END) as fitness_rep,
+                   SUM(CASE WHEN vc.topic LIKE '%nutrition%' THEN vw.network_weight ELSE 0 END) as nutrition_rep,
+                   SUM(CASE WHEN vc.topic LIKE '%food%' OR vc.topic LIKE '%cooking%' OR vc.topic LIKE '%nutrition%' THEN vw.network_weight ELSE 0 END) as culinary_rep,
+                   SUM(CASE WHEN vc.topic LIKE '%edu%' THEN vw.network_weight ELSE 0 END) as edu_rep,
+                   SUM(CASE WHEN vc.topic LIKE '%pro%' THEN vw.network_weight ELSE 0 END) as pro_rep
+            FROM VerifiedClaims vc
+            JOIN VerifierWeight vw ON vc.verifier = vw.author_id
+            GROUP BY vc.claimant
+        )
+        SELECT c.*, 
+               CASE WHEN ts.publicKey IS NOT NULL OR c.author_id = '${filters.profileHandle || ''}' THEN 1 ELSE 0 END AS is_trusted,
+               COALESCE(rs.fitness_rep, 0) as fitness_rep,
+               COALESCE(rs.nutrition_rep, 0) as nutrition_rep,
+               COALESCE(rs.culinary_rep, 0) as culinary_rep,
+               COALESCE(rs.edu_rep, 0) as edu_rep,
+               COALESCE(rs.pro_rep, 0) as pro_rep
+        FROM fts_cards f
+        JOIN cards c ON f.rowid = c.id
+        LEFT JOIN trusted_sources ts ON c.author_id = ts.publicKey
+        LEFT JOIN RepStats rs ON c.author_id = rs.author_id
+        WHERE ${whereClauses.join(' AND ')}
+    `;
 
-    const results = await db.getAllAsync(sql, params);
+    const rawResults = await db.getAllAsync(sql, params);
 
-    return results.map(card => ({
-      ...card,
-      genesis: typeof card.genesis === 'string' ? JSON.parse(card.genesis || '{}') : (card.genesis || {}),
-      history: typeof card.history === 'string' ? JSON.parse(card.history || '[]') : (card.history || [])
-    }));
+    // Apply Domain-Specific Multipliers
+    const scoredResults = rawResults.map(card => {
+        let domainBoost = 0;
+        const safeTopic = (card.topic || '').toLowerCase();
+        
+        if (safeTopic.includes('fitness') || safeTopic.includes('medical') || card.subject === 'WORKOUT_LOG') {
+            domainBoost = card.fitness_rep || 0;
+        } else if (safeTopic.includes('food') || safeTopic.includes('cooking') || safeTopic.includes('recipe')) {
+            domainBoost = card.culinary_rep || 0; 
+        } else if (card.subject === 'NUTRITION_LOG' || safeTopic.includes('nutrition')) {
+            domainBoost = card.nutrition_rep || 0;
+        } else if (safeTopic.includes('edu')) {
+            domainBoost = card.edu_rep || 0;
+        } else if (safeTopic.includes('pro')) {
+            domainBoost = card.pro_rep || 0;
+        }
+
+        const baseScore = (card.depth_score || 0) + (card.hops || 1);
+        const finalScore = baseScore + (baseScore * domainBoost);
+
+        return {
+            ...card,
+            expertiseScore: finalScore,
+            domainBoost,
+            genesis: typeof card.genesis === 'string' ? JSON.parse(card.genesis || '{}') : (card.genesis || {}),
+            history: typeof card.history === 'string' ? JSON.parse(card.history || '[]') : (card.history || [])
+        };
+    });
+
+    // Sort by Trusted (if requested for RAG), then Expertise, then Timestamp
+    scoredResults.sort((a, b) => {
+        if (filters.prioritizeTrusted && b.is_trusted !== a.is_trusted) {
+            return b.is_trusted - a.is_trusted;
+        }
+        if (b.expertiseScore !== a.expertiseScore) return b.expertiseScore - a.expertiseScore;
+        return b.timestamp - a.timestamp;
+    });
+
+    return scoredResults;
   } catch (e) {
     console.log(">> ORACLE: FTS5 partial query skipped:", e.message);
     return [];
@@ -648,15 +756,17 @@ export const insertOrReplaceCard = async (card) => {
       // --- NEW: Lineage ---
       card.parent_id ? String(card.parent_id) : null,
       card.parent_hash ? String(card.parent_hash) : null,
-      card.event_id ? String(card.event_id) : null
+      card.event_id ? String(card.event_id) : null,
+      // --- IMPACT CHAIN ---
+      card.citations ? JSON.stringify(card.citations) : '[]'
     ];
 
     console.log(`>> DB: Inserting/Replacing card with ID [${card.id}], depth_score: ${depthScore}`);
 
     await db.runAsync(
       `INSERT OR REPLACE INTO cards 
-            (id, title, body, topic, subject, author_id, timestamp, hops, genesis, history, forkedFrom, depth_score, hop_count, network_reach, parent_id, parent_hash, event_id)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            (id, title, body, topic, subject, author_id, timestamp, hops, genesis, history, forkedFrom, depth_score, hop_count, network_reach, parent_id, parent_hash, event_id, citations)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       p
     );
 
@@ -711,11 +821,12 @@ export const batchInsertCards = async (cards) => {
             parseInt(card.hops || 0, 10),
             JSON.stringify(card.genesis),
             JSON.stringify(card.history || []),
-            card.forkedFrom ? String(card.forkedFrom) : null
+            card.forkedFrom ? String(card.forkedFrom) : null,
+            card.citations ? JSON.stringify(card.citations) : '[]'
           ];
           await db.runAsync(
-            `INSERT OR IGNORE INTO cards (id, title, body, topic, subject, author_id, timestamp, hops, genesis, history, forkedFrom)
-                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT OR IGNORE INTO cards (id, title, body, topic, subject, author_id, timestamp, hops, genesis, history, forkedFrom, citations)
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             p
           );
         } else {
@@ -881,10 +992,49 @@ export const getCategoryForSubject = async (subject) => {
     }
     return null;
   } catch (error) {
-    console.error(">> getCategoryForSubject Failed:", error);
+    console.error(">> Failed to get current beacon event:", error);
     return null;
   }
 };
+
+export const getCitedCards = async (citationsArg) => {
+  if (!citationsArg) return [];
+  
+  let citationList = citationsArg;
+  if (typeof citationsArg === 'string') {
+      try {
+          citationList = JSON.parse(citationsArg);
+      } catch (e) {
+          citationList = [];
+      }
+  }
+  
+  if (!Array.isArray(citationList) || citationList.length === 0) return [];
+
+  // Extract just the IDs since the array might contain objects like { id, title }
+  const citationIds = citationList.map(c => (typeof c === 'object' && c.id) ? c.id : c).filter(id => id && typeof id === 'string');
+
+  if (citationIds.length === 0) return [];
+
+  try {
+    const placeholders = citationIds.map(() => '?').join(',');
+    const statement = await db.prepareAsync(`SELECT * FROM cards WHERE id IN (${placeholders})`);
+    const result = await statement.executeAsync(citationIds);
+    const rows = await result.getAllAsync();
+    await statement.finalizeAsync();
+    
+    return rows.map(row => ({
+      ...row,
+      genesis: row.genesis ? JSON.parse(row.genesis) : null,
+      history: row.history ? JSON.parse(row.history) : [],
+      citations: row.citations ? JSON.parse(row.citations) : []
+    }));
+  } catch (error) {
+    console.error(">> DB Error: getCitedCards failed:", error);
+    return [];
+  }
+};
+
 
 
 // Helper function if you need raw access elsewhere
@@ -1104,5 +1254,6 @@ export const reconcileUmpireQueue = async () => {
     console.error(">> DB: Failed to reconcile umpire queue:", error);
   }
 };
+
 
 export default db;

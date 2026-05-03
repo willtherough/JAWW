@@ -2,6 +2,8 @@ const IS_DEV = process.env.APP_VARIANT === 'development';
 const IS_MILITARY = process.env.APP_VARIANT === 'military';
 const IS_EDU = process.env.APP_VARIANT === 'education';
 
+const { withAndroidManifest } = require('@expo/config-plugins');
+
 export default ({ config }) => {
   // Base configuration shared across all builds
   const baseConfig = { ...config };
@@ -29,14 +31,14 @@ export default ({ config }) => {
   }
 
   // PRESERVE CORE SETTINGS FROM EXISTING app.json
-  return {
+  const finalConfig = {
     ...baseConfig,
     slug: 'jaww',
     version: '1.0.0',
     runtimeVersion: '1.0.0',
     orientation: 'portrait',
     userInterfaceStyle: 'dark',
-    newArchEnabled: false,
+    newArchEnabled: true,
     splash: {
       image: './assets/splash-icon.png',
       resizeMode: 'contain',
@@ -77,7 +79,7 @@ export default ({ config }) => {
         'expo-build-properties',
         {
           android: { compileSdkVersion: 35, targetSdkVersion: 35, minSdkVersion: 24 },
-          ios: { deploymentTarget: '15.1' },
+          ios: { deploymentTarget: '16.0' },
         },
       ],
       [
@@ -95,4 +97,10 @@ export default ({ config }) => {
       },
     },
   };
+
+  return withAndroidManifest(finalConfig, config => {
+    const mainApplication = config.modResults.manifest.application[0];
+    mainApplication.$['android:largeHeap'] = 'true';
+    return config;
+  });
 };

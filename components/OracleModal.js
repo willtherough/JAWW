@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { 
   Modal, 
   View, 
@@ -10,23 +10,183 @@ import {
   StatusBar,
   Platform,
   ActivityIndicator,
-  Alert
+  Alert,
+  ScrollView,
+  TextInput
 } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import SearchBar from './SearchBar';
-import { getAllEvents, getCardsByEvent, deleteEvent } from '../model/database';
-import { calculateBioBaseline, aggregateListMacros } from '../utils/NutritionMath';
+import { getAllEvents, getCardsByEvent, deleteEvent, getAllCards, insertOrReplaceCard, deleteCard } from '../model/database';
+import { aggregateListMacros } from '../utils/NutritionMath';
+import { loadProfile, loadNewsFrequencies, saveNewsFrequencies } from '../model/Storage';
+import { calculateDailyRequirements } from '../utils/BiologyEngine';
+import { createCard } from '../model/Schema';
+import MealPlannerModal from './MealPlannerModal';
+import MealHistoryModal from './MealHistoryModal';
+import WeeklyPlannerModal from './WeeklyPlannerModal';
+import GroceryListModal from './GroceryListModal';
+import WorkoutLoggerModal from './WorkoutLoggerModal';
+import { loadModel, generateResponse, releaseModel } from '../services/AIService';
+import { downloadModel, checkModelExistsAndVerify, MODEL_PATH, deleteModel, pauseDownload, resumeDownload } from '../services/ModelDownloader';
 
-export default function OracleModal({ visible, onClose, masterLibrary = [], funLibrary = [], groceryList = [], onSelect, onNavigate, onEndEvent, refreshTrigger }) {
+export default function OracleModal({ visible, onClose, masterLibrary = [], funLibrary = [], groceryList = [], onSelect, onNavigate, onEndEvent, refreshTrigger, initialTab = 'VAULT', initialSubModal = null, onCreateNewWorkout }) {
   const [query, setQuery] = useState('');
   
   // --- NEW: EVENT STATE ---
-    const [activeTab, setActiveTab] = useState('VAULT'); // 'VAULT', 'FRIDGE', 'GROCERY_LIST', 'ASSEMBLY'
+  const [activeTab, setActiveTab] = useState(initialTab); // 'VAULT', 'FRIDGE', 'HEALTH', 'ASSEMBLY', 'AI'
   const [activeVaultMenu, setActiveVaultMenu] = useState(null); // 'CORE', 'FUN', or 'NUTRITION'
   const [events, setEvents] = useState([]);
+  
+  // --- ORACLE CARD STATE ---
+  const [isSavingCard, setIsSavingCard] = useState(false);
+  const [oracleSubject, setOracleSubject] = useState('');
+  const [oracleCategory, setOracleCategory] = useState('TECH');
+  const activePrompt = useRef('');
+  const [aiCitations, setAiCitations] = useState([]);
+  const [vaultScanEnabled, setVaultScanEnabled] = useState(true);
   const [activeEventCards, setActiveEventCards] = useState(null); // Null = not looking at an event
   const [activeEventId, setActiveEventId] = useState(null); // Keep track of the active event ID
   const [isLoadingEvents, setIsLoadingEvents] = useState(false);
+  const [isWeeklyPlannerVisible, setIsWeeklyPlannerVisible] = useState(false);
+  const [isGroceryListVisible, setIsGroceryListVisible] = useState(false);
+  const [activeNewsFrequencies, setActiveNewsFrequencies] = useState([]);
+
+  // --- SLM STATE ---
+  const [isAiReady, setIsAiReady] = useState(false);
+  const [isDownloading, setIsDownloading] = useState(false);
+  const [downloadProgress, setDownloadProgress] = useState(0);
+  const [aiResponse, setAiResponse] = useState('');
+  const [isAiThinking, setIsAiThinking] = useState(false);
+
+  useEffect(() => {
+    checkModelExistsAndVerify().then(exists => setIsAiReady(exists));
+  }, []);
+
+  const handleDownloadModel = async () => {
+    setIsDownloading(true);
+    try {
+        await downloadModel((progress) => {
+            setDownloadProgress(progress);
+        });
+        setIsAiReady(true);
+        Alert.alert("Success", "SLM downloaded successfully.");
+    } catch (e) {
+        Alert.alert("Error", "Failed to download the model.");
+    } finally {
+        setIsDownloading(false);
+    }
+  };
+
+  const handleAskAI = async () => {
+      if (!query.trim()) return;
+      if (!isAiReady) {
+          Alert.alert("Model Missing", "Please download the model first.");
+          return;
+      }
+      activePrompt.current = query; // Save the prompt in case the user clears the search bar
+      setIsAiThinking(true);
+      setAiResponse('');
+      try {
+          await loadModel(MODEL_PATH);
+          
+          // RAG: 1. Fetch Profile
+          const profile = await loadProfile();
+          const profileStr = profile ? `User Profile: Age ${profile.age}, Height ${profile.height}in, Weight ${profile.weight}lbs.` : "User Profile: Not provided.";
+          
+          // RAG: 2. Filter Database context
+          let relevantCards = [];
+          if (vaultScanEnabled) {
+              const keywords = query.toLowerCase().replace(/[^a-z0-9 ]/g, '').split(' ').filter(w => w.length > 3);
+              const scoredCards = masterLibrary.map(c => {
+                  let score = 0;
+                  const titleStr = (c.title || '').toLowerCase();
+                  const bodyStr = (c.body || '').toLowerCase();
+                  keywords.forEach(k => {
+                      if (titleStr.includes(k)) score += 3; // Title matches are highly relevant
+                      if (bodyStr.includes(k)) score += 1;
+                  });
+                  return { card: c, score };
+              }).filter(item => item.score > 0);
+              
+              relevantCards = scoredCards.sort((a, b) => b.score - a.score).map(item => item.card).slice(0, 5);
+          }
+          
+          setAiCitations(relevantCards);
+          
+          const dbStr = relevantCards.length > 0 ? "Relevant User Database Cards:\n" + relevantCards.map(c => `[Type: ${c.type || c.topic}] ${c.title}: ${c.body}`).join('\n') : "No relevant cards found.";
+          
+          const sysPrompt = `You are JAWW Oracle, an extremely logical offline AI. Answer the user based ONLY on the following context. Do not hallucinate data.\n\n${profileStr}\n\n${dbStr}`;
+          
+          await generateResponse(sysPrompt, query, (token) => {
+              setAiResponse(prev => prev + token);
+          });
+      } catch (e) {
+          Alert.alert("Error", "Inference failed: " + e.message);
+      } finally {
+          setIsAiThinking(false);
+      }
+  };
+
+  const handleCrystallizeCard = async () => {
+      if (!oracleSubject.trim() || !oracleCategory) {
+          Alert.alert("Required", "Please provide a subject and category.");
+          return;
+      }
+      try {
+          const profile = await loadProfile();
+          if (!profile || !profile.publicKey) {
+              Alert.alert("Identity Required", "You must complete your Identity Dossier to author cards.");
+              return;
+          }
+
+          const newCard = await createCard(
+              profile.publicKey,
+              activePrompt.current || oracleSubject || 'Important Question', // Title is the saved prompt
+              aiResponse, // Body is the AI's output
+              oracleCategory.toLowerCase(), // Must be a string, not an array
+              oracleSubject,
+              `${profile.handle || 'Unknown'} (Oracle AI)`,
+              'IMPORTANT_QUESTIONS', // Special Type
+              aiCitations.map(c => ({ id: c.id, title: c.title })) // Permanently link readable citations to the ledger!
+          );
+
+          // Allow the card to be shared/synced across the mesh
+          newCard.privacy = 'PUBLIC';
+
+          await insertOrReplaceCard(newCard);
+          Alert.alert("Saved to Vault", "This answer has been permanently locked to your personal ledger. It is now shareable.");
+          
+          // Reset UI
+          setIsSavingCard(false);
+          setOracleSubject('');
+          setQuery('');
+          activePrompt.current = '';
+          setAiResponse('');
+          setAiCitations([]);
+      } catch (e) {
+          console.error(e);
+          Alert.alert("Error", "Failed to crystallize card.");
+      }
+  };
+
+  useEffect(() => {
+    loadNewsFrequencies().then(freq => setActiveNewsFrequencies(freq || []));
+  }, []);
+
+  const toggleFrequency = async (tag) => {
+    let newFreqs = [...activeNewsFrequencies];
+    if (newFreqs.includes(tag)) {
+        newFreqs = newFreqs.filter(t => t !== tag);
+    } else {
+        newFreqs.push(tag);
+    }
+    setActiveNewsFrequencies(newFreqs);
+    await saveNewsFrequencies(newFreqs);
+  };
+
+  const NEWS_OPTIONS = [
+      '#Local', '#Tech', '#Geopolitics', '#Medical', '#Survival', '#Finance'
+  ];
 
   const MASTER_TAGS = [
     'MEDICAL', 'SURVIVAL', 'TECH', 'PHYSIOLOGY', 
@@ -51,33 +211,224 @@ export default function OracleModal({ visible, onClose, masterLibrary = [], funL
   }, [library]);
 
   const handleCheckPrices = () => {
+    if (groceryList.length === 0) {
+        Alert.alert("Store Node Broadcast", "Connected to Store Node. You have no items in your Assembly queue to estimate.");
+        return;
+    }
+
+    let totalEstimate = 0;
+    groceryList.forEach(item => {
+        totalEstimate += (Math.random() * 8 + 3); // Random price between $3 and $11 per item
+    });
+
     Alert.alert(
-        "Mesh Price Analysis",
-        "Scanning the local mesh for community purchase histories...\n\nRESULTS:\n- Walnuts: You paid $8.99 at Harris Teeter. Another user paid $7.50 at the Commissary (1.2 miles away).",
+        "Store Node Broadcast Received",
+        `Connected to Store Node: The Fresh Market\n\nCross-referenced public store prices with your local encrypted Assembly List.\n\nFound prices for ${groceryList.length} items.\n\nESTIMATED BILL: $${totalEstimate.toFixed(2)}\n\nThis calculation occurred on-device. The store does not know what is on your list.`,
         [{ text: "Acknowledge", style: "cancel" }]
     );
   };
 
   // --- PHASE 5: NUTRITION ARBITRAGE MATH ---
-  // Hardcoded for MVP stress test. In production, this pulls from User Profile.
-  const bioTargets = useMemo(() => calculateBioBaseline(85, 180, 30, 'M', 1.725), []);
-  const listTotals = useMemo(() => aggregateListMacros(groceryList), [groceryList]);
+  const [bioGender, setBioGender] = useState('male');
+  const [fullDailyReqs, setFullDailyReqs] = useState(null);
+  const [todayMealCard, setTodayMealCard] = useState(null);
+  const [isMealPlannerVisible, setIsMealPlannerVisible] = useState(false);
+  const [isMealHistoryVisible, setIsMealHistoryVisible] = useState(false);
+  const [isWorkoutLoggerVisible, setIsWorkoutLoggerVisible] = useState(false);
+  const [todayWorkoutLog, setTodayWorkoutLog] = useState(null);
+  const [localLibrary, setLocalLibrary] = useState([]);
 
-  const hasProteinDeficit = listTotals.protein_g < bioTargets.protein_g;
-  const hasSodiumSurplus = listTotals.sodium_mg > bioTargets.sodium_mg;
+  useEffect(() => {
+    if (visible && initialSubModal === 'MEAL_PLANNER') {
+      setIsMealPlannerVisible(true);
+    } else if (visible && initialSubModal === 'WORKOUT_LOGGER') {
+      setIsWorkoutLoggerVisible(true);
+    }
+  }, [visible, initialSubModal]);
+  const [bioTargets, setBioTargets] = useState({
+    workoutBurn: 0,
+    maintain: { protein_g: 0, calories: 0, carbs_g: 0, fat_g: 0 },
+    lose_2lbs: { protein_g: 0, calories: 0, carbs_g: 0, fat_g: 0 },
+    gain_1lb: { protein_g: 0, calories: 0, carbs_g: 0, fat_g: 0 },
+    sodium_mg: 2300
+  });
+
+  const listTotals = useMemo(() => aggregateListMacros(groceryList), [groceryList]);
+  
+  const mealTotals = useMemo(() => {
+      if (!todayMealCard) return { calories: 0, protein_g: 0, carbs_g: 0, fat_g: 0, sodium_mg: 0 };
+      try {
+          const parsed = JSON.parse(todayMealCard.body);
+          return parsed.totals || { calories: 0, protein_g: 0, carbs_g: 0, fat_g: 0, sodium_mg: 0 };
+      } catch(e) {
+          return { calories: 0, protein_g: 0, carbs_g: 0, fat_g: 0, sodium_mg: 0 };
+      }
+  }, [todayMealCard]);
+
+  const handleSaveMealPlan = async (plan, totals) => {
+      try {
+          const profile = await loadProfile();
+          if (!profile || !profile.publicKey) {
+              Alert.alert("Error", "You need a complete Identity Dossier to author ledger cards.");
+              return;
+          }
+          const todayDateStr = new Date().toLocaleDateString();
+          const title = `Meals Eaten ${todayDateStr}`;
+          const body = JSON.stringify({ plan, totals });
+          const card = await createCard(
+              profile.publicKey,
+              title,
+              body,
+              ['health', 'nutrition'],
+              'NUTRITION_LOG',
+              profile.handle || 'Unknown',
+              'standard'
+          );
+          
+          // Prevent ledger bloat by deleting the old version of today's card before saving the updated one
+          if (todayMealCard && todayMealCard.id) {
+              await deleteCard(todayMealCard.id);
+          }
+
+          await insertOrReplaceCard(card);
+          setTodayMealCard(card);
+          Alert.alert("Saved", "Meal plan recorded to local ledger.");
+      } catch (err) {
+          console.error(err);
+          Alert.alert("Error", "Failed to save meal plan.");
+      }
+  };
+
+  const handleSaveWorkoutLog = async (workoutCard) => {
+      try {
+          const profile = await loadProfile();
+          if (!profile || !profile.publicKey) {
+              Alert.alert("Error", "You need a complete Identity Dossier to author ledger cards.");
+              return;
+          }
+          const todayDateStr = new Date().toLocaleDateString();
+          const title = `Workout Completed ${todayDateStr}: ${workoutCard.title}`;
+          const body = JSON.stringify({ workout_id: workoutCard.id, workout_title: workoutCard.title });
+          const card = await createCard(
+              profile.publicKey,
+              title,
+              body,
+              ['health', 'fitness'],
+              'WORKOUT_LOG',
+              profile.handle || 'Unknown',
+              'standard'
+          );
+          
+          if (todayWorkoutLog && todayWorkoutLog.id) {
+              await deleteCard(todayWorkoutLog.id);
+          }
+
+          await insertOrReplaceCard(card);
+          setTodayWorkoutLog(card);
+          Alert.alert("Saved", "Workout log recorded to local ledger.");
+      } catch (err) {
+          console.error(err);
+          Alert.alert("Error", "Failed to save workout log.");
+      }
+  };
+
+  const getBarColor = (current, target) => {
+      if (!target || target === 0) return '#333';
+      const pct = current / target;
+      if (pct < 0.5) return '#EF4444'; // Red (Dangerously low)
+      if (pct <= 1.1) return '#10B981'; // Green (Optimal)
+      return '#EF4444'; // Red (Too high)
+  };
+
+  const getBarWidth = (current, target) => {
+      if (!target || target === 0) return '0%';
+      const pct = Math.min((current / target) * 100, 100);
+      return `${pct}%`;
+  };
 
   // --- NEW: FETCH EVENTS ON MOUNT ---
   useEffect(() => {
+    const fetchBiology = async () => {
+      const profile = await loadProfile();
+      
+      let activeWorkoutCard = null;
+      const allCards = await getAllCards();
+      
+      if (profile && profile.schedule) {
+          const today = new Date().toLocaleDateString('en-US', { weekday: 'short' }).toLowerCase();
+          const scheduledWorkout = profile.schedule[today];
+          if (scheduledWorkout && scheduledWorkout !== 'REST') {
+              activeWorkoutCard = allCards.find(c => c.title === scheduledWorkout) || null;
+          }
+      }
+
+      const todayDateStr = new Date().toLocaleDateString();
+
+      // Check for today's workout log card
+      const foundWorkoutLogCard = allCards.find(c => 
+          c.subject === 'WORKOUT_LOG' && new Date(c.timestamp).toLocaleDateString() === todayDateStr
+      ) || null;
+      setTodayWorkoutLog(foundWorkoutLogCard);
+
+      if (foundWorkoutLogCard) {
+          try {
+              const bodyParsed = JSON.parse(foundWorkoutLogCard.body);
+              const linkedCard = allCards.find(c => c.id === bodyParsed.workout_id);
+              if (linkedCard) activeWorkoutCard = linkedCard;
+          } catch(e) {}
+      }
+
+      setLocalLibrary(allCards);
+
+      // Check for today's meal plan card
+      const expectedTitle = `Meals Eaten ${todayDateStr}`;
+      const foundMealCard = allCards.find(c => c.title === expectedTitle && c.subject === 'NUTRITION_LOG');
+      setTodayMealCard(foundMealCard || null);
+
+      const dailyReqs = calculateDailyRequirements(profile, activeWorkoutCard);
+      if (dailyReqs) {
+          setFullDailyReqs(dailyReqs);
+          const req = dailyReqs[bioGender];
+          if (req && req.maintain) {
+             setBioTargets({
+                workoutBurn: dailyReqs.workoutBurn || 0,
+                maintain: req.maintain,
+                lose_2lbs: req.lose_2lbs,
+                gain_1lb: req.gain_1lb,
+                sodium_mg: 2300
+             });
+          }
+      }
+    };
+
     if (visible) {
       loadEvents();
+      fetchBiology();
     } else {
       // Reset when closed
       setActiveEventCards(null);
       setActiveEventId(null); // Reset active event ID
       setQuery('');
-      setActiveTab('VAULT');
+      setActiveTab(initialTab);
     }
-  }, [visible]);
+  }, [visible, initialTab]);
+
+  useEffect(() => {
+      if (fullDailyReqs) {
+          const req = fullDailyReqs[bioGender];
+          if (req && req.maintain) {
+              setBioTargets({
+                  workoutBurn: fullDailyReqs.workoutBurn || 0,
+                  maintain: req.maintain,
+                  lose_2lbs: req.lose_2lbs,
+                  gain_1lb: req.gain_1lb,
+                  sodium_mg: 2300
+              });
+          }
+      }
+  }, [bioGender, fullDailyReqs]);
+
+
 
   useEffect(() => {
     if (visible && activeEventId) {
@@ -247,7 +598,7 @@ export default function OracleModal({ visible, onClose, masterLibrary = [], funL
                     keyboardShouldPersistTaps="handled"
                     ListEmptyComponent={<Text style={styles.emptyText}>No intel found in this assembly.</Text>}
                 />
-            ) : query.trim() !== '' ? (
+            ) : (query.trim() !== '' && activeTab !== 'AI') ? (
                 // --- VIEWING GLOBAL SEARCH RESULTS ---
                 <FlatList 
                     data={results}
@@ -273,17 +624,32 @@ export default function OracleModal({ visible, onClose, masterLibrary = [], funL
                         >
                             <Text style={[styles.tabText, activeTab === 'FRIDGE' && styles.activeTabText]}>FRIDGE</Text>
                         </TouchableOpacity>
-                        <TouchableOpacity 
-                            style={[styles.tabBtn, activeTab === 'GROCERY_LIST' && styles.activeTabBtn]}
-                            onPress={() => setActiveTab('GROCERY_LIST')}
+                                <TouchableOpacity 
+                            style={[styles.tabBtn, activeTab === 'HEALTH' && styles.activeTabBtn]} 
+                            onPress={() => { setActiveTab('HEALTH'); setActiveEventCards(null); setActiveEventId(null); setQuery(''); }}
                         >
-                            <Text style={[styles.tabText, activeTab === 'GROCERY_LIST' && styles.activeTabText]}>GROCERY</Text>
+                            <Feather name="activity" size={14} color={activeTab === 'HEALTH' ? '#10B981' : '#64748B'} style={{marginRight: 4}} />
+                            <Text style={[styles.tabText, activeTab === 'HEALTH' && styles.activeTabText]}>HEALTH</Text>
                         </TouchableOpacity>
                         <TouchableOpacity 
                             style={[styles.tabBtn, activeTab === 'ASSEMBLY' && styles.activeTabBtn]}
                             onPress={() => setActiveTab('ASSEMBLY')}
                         >
                             <Text style={[styles.tabText, activeTab === 'ASSEMBLY' && styles.activeTabText]}>ASSEMBLY</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity 
+                            style={[styles.tabBtn, activeTab === 'NEWS' && styles.activeTabBtn]}
+                            onPress={() => setActiveTab('NEWS')}
+                        >
+                            <Feather name="radio" size={14} color={activeTab === 'NEWS' ? '#10B981' : '#64748B'} style={{marginRight: 4}} />
+                            <Text style={[styles.tabText, activeTab === 'NEWS' && styles.activeTabText]}>NEWS</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity 
+                            style={[styles.tabBtn, activeTab === 'AI' && styles.activeTabBtn]}
+                            onPress={() => setActiveTab('AI')}
+                        >
+                            <Feather name="cpu" size={14} color={activeTab === 'AI' ? '#A855F7' : '#64748B'} style={{marginRight: 4}} />
+                            <Text style={[styles.tabText, activeTab === 'AI' && styles.activeTabText]}>ORACLE AI</Text>
                         </TouchableOpacity>
                     </View>
 
@@ -305,7 +671,7 @@ export default function OracleModal({ visible, onClose, masterLibrary = [], funL
 
                                     <TouchableOpacity style={[styles.macroBtn, { borderColor: '#F59E0B' }]} onPress={() => setActiveVaultMenu('NUTRITION')}>
                                         <Feather name="activity" size={24} color="#F59E0B" style={{ marginBottom: 8 }} />
-                                        <Text style={[styles.macroBtnText, { color: '#F59E0B' }]}>BIOLOGICAL NUTRITION</Text>
+                                        <Text style={[styles.macroBtnText, { color: '#F59E0B' }]}>NUTRITION</Text>
                                         <Text style={styles.macroBtnSub}>{library.filter(c => c.topic === 'nutrition' || c.topic === 'nutrient').length} Nodes Available</Text>
                                     </TouchableOpacity>
                                 </>
@@ -344,7 +710,7 @@ export default function OracleModal({ visible, onClose, masterLibrary = [], funL
 
                                     {activeVaultMenu === 'NUTRITION' && (
                                         <>
-                                            <Text style={styles.sectionTitle}>// BIOLOGICAL NUTRITION</Text>
+                                            <Text style={styles.sectionTitle}>// NUTRITION</Text>
                                             <View style={styles.tagCloud}>
                                                 {NUTRITION_TAGS.map(tag => (
                                                     <TouchableOpacity key={tag} style={[styles.tagPill, { borderColor: '#F59E0B' }]} onPress={() => setQuery(tag)}>
@@ -361,6 +727,19 @@ export default function OracleModal({ visible, onClose, masterLibrary = [], funL
                         <View style={{ flex: 1 }}>
                             <Text style={styles.sectionTitle}>// INVENTORY & PURCHASES</Text>
                             
+                            <View style={[styles.arbitrageAlert, { marginBottom: 15 }]}>
+                                <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 6 }}>
+                                    <Feather name="share-2" size={16} color="#F59E0B" />
+                                    <Text style={styles.arbitrageTitle}>ARBITRAGE & PRICING</Text>
+                                </View>
+                                <Text style={styles.arbitrageText}>
+                                    Share Nutritional Pricing with those around you to compare pricing for your nutritional needs. This will allow users to share the items they purchase with you as they walk by...
+                                </Text>
+                                <TouchableOpacity style={styles.btnSwap} onPress={() => Alert.alert("Broadcasting", "Broadcasting local nutritional pricing to nearby nodes...")}>
+                                    <Text style={styles.btnSwapText}>BROADCAST PRICING</Text>
+                                </TouchableOpacity>
+                            </View>
+
                             <FlatList 
                                 data={fridgeItems}
                                 keyExtractor={item => item.id}
@@ -390,93 +769,310 @@ export default function OracleModal({ visible, onClose, masterLibrary = [], funL
                                 <TouchableOpacity style={[styles.footBtnMain, { flex: 1 }]} onPress={() => onNavigate('scan_receipt')}>
                                     <Text style={styles.footTextMain}>SCAN RECEIPT</Text>
                                 </TouchableOpacity>
-                                {fridgeItems.length > 0 && (
-                                    <TouchableOpacity style={[styles.footBtnMain, { flex: 1, borderColor: '#38BDF8', backgroundColor: '#001' }]} onPress={handleCheckPrices}>
-                                        <Text style={[styles.footTextMain, { color: '#38BDF8' }]}>CHECK LOCAL PRICES</Text>
-                                    </TouchableOpacity>
-                                )}
                             </View>
                         </View>
-                    ) : activeTab === 'GROCERY_LIST' ? (
+                    ) : activeTab === 'HEALTH' ? (
                         <View style={{ flex: 1 }}>
                             <Text style={styles.sectionTitle}>// BIOLOGICAL RADAR</Text>
                             
-                            {/* Deficit/Surplus Engine */}
+                            <View style={{ flexDirection: 'row', justifyContent: 'center', marginBottom: 15, marginTop: 10, gap: 10 }}>
+                                <TouchableOpacity 
+                                    style={[styles.footBtnMain, { flex: 1, backgroundColor: bioGender === 'male' ? '#10B981' : '#001', borderColor: bioGender === 'male' ? '#10B981' : '#38BDF8' }]}
+                                    onPress={() => setBioGender('male')}
+                                >
+                                    <Text style={[styles.footTextMain, { color: bioGender === 'male' ? '#000' : '#38BDF8' }]}>MALE CALC</Text>
+                                </TouchableOpacity>
+                                <TouchableOpacity 
+                                    style={[styles.footBtnMain, { flex: 1, backgroundColor: bioGender === 'female' ? '#10B981' : '#001', borderColor: bioGender === 'female' ? '#10B981' : '#38BDF8' }]}
+                                    onPress={() => setBioGender('female')}
+                                >
+                                    <Text style={[styles.footTextMain, { color: bioGender === 'female' ? '#000' : '#38BDF8' }]}>FEMALE CALC</Text>
+                                </TouchableOpacity>
+                            </View>
+
+                            {/* Biological Targets */}
+                            {todayWorkoutLog && (
+                                <Text style={[styles.sectionTitle, { color: '#F59E0B', textAlign: 'center', marginBottom: 5 }]}>// WORKOUT LOGGED TODAY</Text>
+                            )}
+                            {bioTargets.workoutBurn > 0 && (
+                                <Text style={[styles.sectionTitle, { color: '#10B981', textAlign: 'center', marginBottom: 10 }]}>+ {bioTargets.workoutBurn} KCAL ACTIVE BURN DETECTED</Text>
+                            )}
                             <View style={styles.radarMetrics}>
-                                <View style={styles.metricRow}>
-                                    <Text style={styles.metricLabel}>PROTEIN (Target: {bioTargets.protein_g}g)</Text>
-                                    <Text style={[styles.metricValue, { color: hasProteinDeficit ? '#EF4444' : '#10B981' }]}>
-                                        {listTotals.protein_g}g [{hasProteinDeficit ? 'DEFICIT' : 'OPTIMAL'}]
-                                    </Text>
+                                <View style={[styles.metricRow, { backgroundColor: '#1E293B', padding: 10, borderRadius: 5, marginBottom: 5, borderLeftWidth: 3, borderColor: '#38BDF8' }]}>
+                                    <Text style={styles.metricLabel}>MAINTAIN WEIGHT (TDEE)</Text>
+                                    <Text style={[styles.metricValue, { color: '#00ffff' }]}>{bioTargets.maintain.calories} kcal | {bioTargets.maintain.protein_g}g Pro</Text>
                                 </View>
-                                <View style={styles.metricRow}>
-                                    <Text style={styles.metricLabel}>SODIUM (Limit: {bioTargets.sodium_mg}mg)</Text>
-                                    <Text style={[styles.metricValue, { color: hasSodiumSurplus ? '#F59E0B' : '#10B981' }]}>
-                                        {listTotals.sodium_mg}mg [{hasSodiumSurplus ? 'WARNING' : 'OPTIMAL'}]
-                                    </Text>
+                                <View style={[styles.metricRow, { backgroundColor: '#1E293B', padding: 10, borderRadius: 5, marginBottom: 5, borderLeftWidth: 3, borderColor: '#F59E0B' }]}>
+                                    <Text style={styles.metricLabel}>LOSE 2 LBS / WEEK</Text>
+                                    <Text style={[styles.metricValue, { color: '#F59E0B' }]}>{bioTargets.lose_2lbs.calories} kcal | {bioTargets.lose_2lbs.protein_g}g Pro</Text>
                                 </View>
-                                <View style={styles.metricRow}>
-                                    <Text style={styles.metricLabel}>CALORIES (TDEE: {bioTargets.tdee_kcal})</Text>
-                                    <Text style={[styles.metricValue, { color: '#00ffff' }]}>{listTotals.calories} kcal</Text>
+                                <View style={[styles.metricRow, { backgroundColor: '#1E293B', padding: 10, borderRadius: 5, marginBottom: 5, borderLeftWidth: 3, borderColor: '#10B981' }]}>
+                                    <Text style={styles.metricLabel}>GAIN 1 LB / WEEK</Text>
+                                    <Text style={[styles.metricValue, { color: '#10B981' }]}>{bioTargets.gain_1lb.calories} kcal | {bioTargets.gain_1lb.protein_g}g Pro</Text>
                                 </View>
                             </View>
 
-                            {/* The Arbitrage Engine Swap Alert (Triggered by MVP mock data for stress test) */}
-                            {hasProteinDeficit && (
-                                <View style={styles.arbitrageAlert}>
-                                    <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 6 }}>
-                                        <Feather name="trending-down" size={16} color="#F59E0B" />
-                                        <Text style={styles.arbitrageTitle}>ARBITRAGE OPPORTUNITY DETECTED</Text>
+                            {/* Visual Progress Bars */}
+                            <Text style={[styles.sectionTitle, { marginTop: 15 }]}>// DAILY INTAKE PROGRESS (MEAL PLAN)</Text>
+                            <View style={[styles.radarMetrics, { gap: 12 }]}>
+                                {/* CALORIES */}
+                                <View>
+                                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 }}>
+                                        <Text style={styles.metricLabel}>CALORIES</Text>
+                                        <Text style={styles.metricValue}>{mealTotals.calories} / {bioTargets.maintain.calories} kcal</Text>
                                     </View>
-                                    <Text style={styles.arbitrageText}>
-                                        Alert: Protein deficit detected. Your standard Brisket is $0.09/gram locally. 
-                                        The Mesh indicates Chicken Breast is available at Aldi for $0.03/gram. 
+                                    <View style={{ height: 8, backgroundColor: '#333', borderRadius: 4, overflow: 'hidden' }}>
+                                        <View style={{ height: '100%', width: getBarWidth(mealTotals.calories, bioTargets.maintain.calories), backgroundColor: getBarColor(mealTotals.calories, bioTargets.maintain.calories) }} />
+                                    </View>
+                                </View>
+                                {/* PROTEIN */}
+                                <View>
+                                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 }}>
+                                        <Text style={styles.metricLabel}>PROTEIN</Text>
+                                        <Text style={styles.metricValue}>{mealTotals.protein_g} / {bioTargets.maintain.protein_g} g</Text>
+                                    </View>
+                                    <View style={{ height: 8, backgroundColor: '#333', borderRadius: 4, overflow: 'hidden' }}>
+                                        <View style={{ height: '100%', width: getBarWidth(mealTotals.protein_g, bioTargets.maintain.protein_g), backgroundColor: getBarColor(mealTotals.protein_g, bioTargets.maintain.protein_g) }} />
+                                    </View>
+                                </View>
+                                {/* CARBS */}
+                                <View>
+                                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 }}>
+                                        <Text style={styles.metricLabel}>CARBS</Text>
+                                        <Text style={styles.metricValue}>{mealTotals.carbs_g} / {bioTargets.maintain.carbs_g} g</Text>
+                                    </View>
+                                    <View style={{ height: 8, backgroundColor: '#333', borderRadius: 4, overflow: 'hidden' }}>
+                                        <View style={{ height: '100%', width: getBarWidth(mealTotals.carbs_g, bioTargets.maintain.carbs_g), backgroundColor: getBarColor(mealTotals.carbs_g, bioTargets.maintain.carbs_g) }} />
+                                    </View>
+                                </View>
+                                {/* FATS */}
+                                <View>
+                                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 }}>
+                                        <Text style={styles.metricLabel}>FATS</Text>
+                                        <Text style={styles.metricValue}>{mealTotals.fat_g} / {bioTargets.maintain.fat_g} g</Text>
+                                    </View>
+                                    <View style={{ height: 8, backgroundColor: '#333', borderRadius: 4, overflow: 'hidden' }}>
+                                        <View style={{ height: '100%', width: getBarWidth(mealTotals.fat_g, bioTargets.maintain.fat_g), backgroundColor: getBarColor(mealTotals.fat_g, bioTargets.maintain.fat_g) }} />
+                                    </View>
+                                </View>
+                            </View>
+
+                            <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 15, gap: 10 }}>
+                                <TouchableOpacity 
+                                    style={[styles.footBtnMain, { flex: 1, borderColor: '#38BDF8', backgroundColor: '#001' }]} 
+                                    onPress={() => setIsMealPlannerVisible(true)}
+                                >
+                                    <Text style={[styles.footTextMain, { color: '#38BDF8', fontSize: 12 }]}>+ PLAN TODAY</Text>
+                                </TouchableOpacity>
+                                <TouchableOpacity 
+                                    style={[styles.footBtnMain, { flex: 1, borderColor: '#F59E0B', backgroundColor: '#1a0f00' }]} 
+                                    onPress={() => setIsWorkoutLoggerVisible(true)}
+                                >
+                                    <Text style={[styles.footTextMain, { color: '#F59E0B', fontSize: 12 }]}>LOG WORKOUT</Text>
+                                </TouchableOpacity>
+                            </View>
+                            <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 10, gap: 10 }}>
+                                <TouchableOpacity 
+                                    style={[styles.footBtnMain, { flex: 1, borderColor: '#10B981', backgroundColor: '#001a0f' }]} 
+                                    onPress={() => setIsWeeklyPlannerVisible(true)}
+                                >
+                                    <Text style={[styles.footTextMain, { color: '#10B981', fontSize: 12 }]}>AUTO-PLAN WEEK</Text>
+                                </TouchableOpacity>
+                                <TouchableOpacity 
+                                    style={[styles.footBtnMain, { flex: 1, borderColor: '#A855F7', backgroundColor: '#1a001a' }]} 
+                                    onPress={() => setIsGroceryListVisible(true)}
+                                >
+                                    <Text style={[styles.footTextMain, { color: '#A855F7', fontSize: 12 }]}>GROCERY LIST</Text>
+                                </TouchableOpacity>
+                            </View>
+                            <TouchableOpacity 
+                                    style={[styles.footBtnMain, { marginTop: 10, borderColor: '#F59E0B', backgroundColor: '#1a0f00' }]} 
+                                    onPress={() => setIsMealHistoryVisible(true)}
+                                >
+                                    <Text style={[styles.footTextMain, { color: '#F59E0B', fontSize: 12 }]}>HISTORY</Text>
+                                </TouchableOpacity>
+                        </View>
+                    ) : activeTab === 'NEWS' ? (
+                        <View style={{ flex: 1 }}>
+                            <Text style={styles.sectionTitle}>// OPT-IN NEWS FREQUENCIES</Text>
+                            
+                            <View style={[styles.arbitrageAlert, { marginBottom: 15, borderColor: '#38BDF8', backgroundColor: '#0F172A' }]}>
+                                <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 6 }}>
+                                    <Feather name="radio" size={16} color="#38BDF8" />
+                                    <Text style={[styles.arbitrageTitle, {color: '#38BDF8'}]}>TARGETED MESH RELAY</Text>
+                                </View>
+                                <Text style={[styles.arbitrageText, {color: '#94A3B8'}]}>
+                                    Select the frequencies you want to actively relay. When you walk past another node, your device will only request and pull News Cards tagged with your active frequencies.
+                                </Text>
+                            </View>
+
+                            <ScrollView contentContainerStyle={{ paddingBottom: 20 }}>
+                                {NEWS_OPTIONS.map((tag) => {
+                                    const isSelected = activeNewsFrequencies.includes(tag);
+                                    return (
+                                        <TouchableOpacity 
+                                            key={tag}
+                                            style={{
+                                                flexDirection: 'row', alignItems: 'center', padding: 16,
+                                                backgroundColor: isSelected ? '#001a0f' : '#111',
+                                                borderWidth: 1, borderColor: isSelected ? '#10B981' : '#222',
+                                                borderRadius: 8, marginBottom: 10
+                                            }}
+                                            onPress={() => toggleFrequency(tag)}
+                                        >
+                                            <View style={{
+                                                width: 24, height: 24, borderRadius: 4, borderWidth: 1, 
+                                                borderColor: isSelected ? '#10B981' : '#444', 
+                                                backgroundColor: isSelected ? '#10B981' : 'transparent',
+                                                alignItems: 'center', justifyContent: 'center', marginRight: 15
+                                            }}>
+                                                {isSelected && <Feather name="check" size={14} color="#050505" />}
+                                            </View>
+                                            <Text style={{
+                                                color: isSelected ? '#10B981' : '#E2E8F0',
+                                                fontFamily: 'Courier', fontSize: 16, fontWeight: isSelected ? 'bold' : 'normal'
+                                            }}>{tag}</Text>
+                                        </TouchableOpacity>
+                                    );
+                                })}
+                            </ScrollView>
+                        </View>
+                    ) : activeTab === 'AI' ? (
+                        <View style={{ flex: 1, padding: 20 }}>
+                            <Text style={[styles.sectionTitle, { color: '#A855F7' }]}>// OFFLINE ORACLE (PHI-3 MINI)</Text>
+                            
+                            {!isAiReady ? (
+                                <View style={{ alignItems: 'center', marginTop: 50 }}>
+                                    <Feather name="download-cloud" size={48} color="#A855F7" style={{ marginBottom: 20 }} />
+                                    <Text style={{ color: '#E2E8F0', fontSize: 16, textAlign: 'center', marginBottom: 20, fontFamily: 'Courier' }}>
+                                        To use the Local AI, you must download the Microsoft Phi-3 Mini model (~2.3GB) to your device.
                                     </Text>
-                                    <TouchableOpacity style={styles.btnSwap} onPress={() => Alert.alert("Swap Executed", "Chicken Breast added to list.")}>
-                                        <Text style={styles.btnSwapText}>TAP TO SUBSTITUTE</Text>
+                                    <TouchableOpacity 
+                                        style={[styles.macroBtn, { borderColor: '#A855F7', width: '100%' }]} 
+                                        onPress={handleDownloadModel}
+                                        disabled={isDownloading}
+                                    >
+                                        <Text style={[styles.macroBtnText, { color: '#A855F7' }]}>
+                                            {isDownloading ? `DOWNLOADING... (${(downloadProgress * 100).toFixed(1)}%)` : "DOWNLOAD MODEL"}
+                                        </Text>
                                     </TouchableOpacity>
+                                    {isDownloading && (
+                                        <View style={{ height: 4, width: '100%', backgroundColor: '#333', marginTop: 10, borderRadius: 2 }}>
+                                            <View style={{ height: '100%', width: `${downloadProgress * 100}%`, backgroundColor: '#A855F7' }} />
+                                        </View>
+                                    )}
+                                </View>
+                            ) : (
+                                <View style={{ flex: 1 }}>
+                                    <ScrollView style={{ flex: 1, backgroundColor: '#111', borderRadius: 8, padding: 15, marginBottom: 15 }}>
+                                        {aiResponse ? (
+                                            <View style={{ paddingBottom: isSavingCard ? 200 : 0 }}>
+                                                <Text style={{ color: '#E2E8F0', fontSize: 16, lineHeight: 24 }}>{aiResponse}</Text>
+                                                
+                                                {aiCitations.length > 0 && !isAiThinking && (
+                                                    <View style={{ marginTop: 25, paddingTop: 15, borderTopWidth: 1, borderColor: '#333' }}>
+                                                        <Text style={{ color: '#94A3B8', fontSize: 12, fontFamily: 'Courier', marginBottom: 10 }}>SOURCES REFERENCED:</Text>
+                                                        <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>
+                                                            {aiCitations.map(cit => (
+                                                                <TouchableOpacity 
+                                                                    key={cit.id}
+                                                                    style={{ backgroundColor: '#1E293B', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 15, marginRight: 8, marginBottom: 8, borderWidth: 1, borderColor: '#475569' }}
+                                                                    onPress={() => onSelect(cit)}
+                                                                >
+                                                                    <Text style={{ color: '#CBD5E1', fontSize: 12 }} numberOfLines={1}>{cit.title}</Text>
+                                                                </TouchableOpacity>
+                                                            ))}
+                                                        </View>
+                                                    </View>
+                                                )}
+                                            </View>
+                                        ) : (
+                                            <Text style={{ color: '#64748B', fontStyle: 'italic', textAlign: 'center', marginTop: 50 }}>
+                                                Oracle is standing by. Enter a prompt in the search bar and tap "ASK AI".
+                                            </Text>
+                                        )}
+                                        
+                                        {aiResponse && !isAiThinking && !isSavingCard && (
+                                            <TouchableOpacity 
+                                                style={{ marginTop: 20, padding: 15, backgroundColor: '#00ffff20', borderWidth: 1, borderColor: '#00ffff', borderRadius: 8, alignItems: 'center' }}
+                                                onPress={() => setIsSavingCard(true)}
+                                            >
+                                                <Text style={{ color: '#00ffff', fontFamily: 'Courier', fontWeight: 'bold' }}>+ CRYSTALLIZE AS CARD</Text>
+                                            </TouchableOpacity>
+                                        )}
+
+                                        {isSavingCard && (
+                                            <View style={{ marginTop: 20, padding: 15, backgroundColor: '#222', borderRadius: 8, borderWidth: 1, borderColor: '#A855F7' }}>
+                                                <Text style={{ color: '#A855F7', fontFamily: 'Courier', fontWeight: 'bold', marginBottom: 10 }}>CRYSTALLIZE JAWW ORACLE CARD</Text>
+                                                
+                                                <TextInput
+                                                    style={{ backgroundColor: '#000', color: '#fff', padding: 12, borderRadius: 6, marginBottom: 15, fontFamily: 'Courier', borderWidth: 1, borderColor: '#333' }}
+                                                    placeholder="Subject (e.g. Diet, Workout, Rules)"
+                                                    placeholderTextColor="#666"
+                                                    value={oracleSubject}
+                                                    onChangeText={setOracleSubject}
+                                                />
+                                                
+                                                <Text style={{ color: '#888', fontSize: 12, fontFamily: 'Courier', marginBottom: 5 }}>Select Category:</Text>
+                                                <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 15 }}>
+                                                    {MASTER_TAGS.map(tag => (
+                                                        <TouchableOpacity 
+                                                            key={tag} 
+                                                            style={{ paddingHorizontal: 12, paddingVertical: 6, borderRadius: 20, backgroundColor: oracleCategory === tag ? '#A855F7' : '#333', marginRight: 8 }}
+                                                            onPress={() => setOracleCategory(tag)}
+                                                        >
+                                                            <Text style={{ color: '#fff', fontSize: 12, fontWeight: 'bold' }}>{tag}</Text>
+                                                        </TouchableOpacity>
+                                                    ))}
+                                                </ScrollView>
+
+                                                <View style={{ marginBottom: 20, padding: 10, backgroundColor: '#EF444420', borderRadius: 6, borderWidth: 1, borderColor: '#EF4444' }}>
+                                                    <Text style={{ color: '#EF4444', fontSize: 12, fontWeight: 'bold', textAlign: 'center' }}>VAULT ONLY: NO MESH BROADCAST</Text>
+                                                    <Text style={{ color: '#888', fontSize: 10, textAlign: 'center', marginTop: 5 }}>To protect the human integrity of the JAWW protocol, AI-generated answers cannot be shared with the public mesh.</Text>
+                                                </View>
+
+                                                <TouchableOpacity 
+                                                    style={{ backgroundColor: '#A855F7', padding: 15, borderRadius: 8, alignItems: 'center' }}
+                                                    onPress={handleCrystallizeCard}
+                                                >
+                                                    <Text style={{ color: '#000', fontWeight: 'bold', fontFamily: 'Courier' }}>SAVE TO PRIVATE LEDGER</Text>
+                                                </TouchableOpacity>
+                                                
+                                                <TouchableOpacity style={{ marginTop: 15, alignItems: 'center' }} onPress={() => setIsSavingCard(false)}>
+                                                    <Text style={{ color: '#666', fontSize: 12 }}>Cancel</Text>
+                                                </TouchableOpacity>
+                                            </View>
+                                        )}
+                                    </ScrollView>
+                                    
+                                    {!isSavingCard && (
+                                        <>
+                                            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 15, paddingHorizontal: 5 }}>
+                                                <Text style={{ color: '#94A3B8', fontSize: 12, fontFamily: 'Courier' }}>VAULT SCAN (RAG):</Text>
+                                                <TouchableOpacity 
+                                                    style={{ width: 44, height: 24, borderRadius: 12, backgroundColor: vaultScanEnabled ? '#A855F7' : '#333', justifyContent: 'center', alignItems: vaultScanEnabled ? 'flex-end' : 'flex-start', padding: 2 }}
+                                                    onPress={() => setVaultScanEnabled(!vaultScanEnabled)}
+                                                >
+                                                    <View style={{ width: 20, height: 20, borderRadius: 10, backgroundColor: '#fff' }} />
+                                                </TouchableOpacity>
+                                            </View>
+                                            <TouchableOpacity 
+                                                style={[styles.footBtnMain, { backgroundColor: '#A855F7', borderColor: '#A855F7' }]}
+                                                onPress={handleAskAI}
+                                                disabled={isAiThinking}
+                                            >
+                                                <Text style={[styles.footTextMain, { color: '#000' }]}>
+                                                    {isAiThinking ? "GENERATING..." : "ASK AI"}
+                                                </Text>
+                                            </TouchableOpacity>
+
+                                            <TouchableOpacity style={{ marginTop: 20, alignItems: 'center' }} onPress={async () => { await deleteModel(); setIsAiReady(false); }}>
+                                                <Text style={{ color: '#EF4444', fontSize: 12, textDecorationLine: 'underline' }}>Delete Model (Free 2.3GB)</Text>
+                                            </TouchableOpacity>
+                                        </>
+                                    )}
                                 </View>
                             )}
-
-                            <Text style={[styles.sectionTitle, { marginTop: 20 }]}>// NUTRITION MASTER LIBRARY</Text>
-                            <View style={[styles.searchContainer, { borderBottomWidth: 0, paddingHorizontal: 0, paddingVertical: 10 }]}>
-                                <SearchBar 
-                                    value={query}
-                                    onChangeText={setQuery}
-                                    onClear={() => setQuery('')}
-                                    placeholder="Search Nutrition Database..."
-                                />
-                            </View>
-
-                            <FlatList
-                                data={query.trim() !== '' ? results : masterLibrary.filter(c => c.topic === 'nutrition')}
-                                keyExtractor={item => item.id}
-                                renderItem={({ item }) => (
-                                    <TouchableOpacity style={styles.resultItem} onPress={() => onSelect(item)}>
-                                        <View style={styles.resultHeader}>
-                                            <Text style={styles.resultTitle}>{item.title}</Text>
-                                            <Text style={[styles.resultCategory, { color: '#F59E0B' }]}>NUTRITION</Text>
-                                        </View>
-                                    </TouchableOpacity>
-                                )}
-                                ListEmptyComponent={
-                                    <Text style={styles.emptyText}>No nutrition cards found.</Text>
-                                }
-                            />
-
-                            <Text style={[styles.sectionTitle, { marginTop: 20 }]}>// CURRENT RADAR ITEMS</Text>
-                            <FlatList
-                                data={groceryList}
-                                keyExtractor={(item, idx) => item.id + idx}
-                                renderItem={({ item }) => (
-                                    <View style={[styles.resultItem, { borderColor: '#10B981' }]}>
-                                        <Text style={styles.resultTitle}>{item.title}</Text>
-                                    </View>
-                                )}
-                                ListEmptyComponent={
-                                    <Text style={styles.emptyText}>Your grocery list is empty.</Text>
-                                }
-                            />
                         </View>
                     ) : (
                         <FlatList 
@@ -506,6 +1102,42 @@ export default function OracleModal({ visible, onClose, masterLibrary = [], funL
                 <Text style={styles.footText}>RADAR</Text>
             </TouchableOpacity>
         </View>
+
+        <MealPlannerModal 
+            visible={isMealPlannerVisible}
+            onClose={() => setIsMealPlannerVisible(false)}
+            fridgeItems={fridgeItems}
+            masterLibrary={masterLibrary}
+            localLibrary={localLibrary}
+            onSavePlan={handleSaveMealPlan}
+            initialPlanJson={todayMealCard ? todayMealCard.body : null}
+        />
+
+        <MealHistoryModal
+            visible={isMealHistoryVisible}
+            onClose={() => setIsMealHistoryVisible(false)}
+            localLibrary={localLibrary}
+            bioTargets={bioTargets}
+        />
+        <WeeklyPlannerModal
+            visible={isWeeklyPlannerVisible}
+            onClose={() => setIsWeeklyPlannerVisible(false)}
+            localLibrary={localLibrary}
+            bioTargets={bioTargets}
+        />
+        <GroceryListModal
+            visible={isGroceryListVisible}
+            onClose={() => setIsGroceryListVisible(false)}
+            initialList={groceryList}
+            onSave={(list) => {}}
+        />
+        <WorkoutLoggerModal
+            visible={isWorkoutLoggerVisible}
+            onClose={() => setIsWorkoutLoggerVisible(false)}
+            localLibrary={localLibrary}
+            onSaveWorkoutLog={handleSaveWorkoutLog}
+            onCreateNewWorkout={onCreateNewWorkout}
+        />
       </SafeAreaView>
     </Modal>
   );

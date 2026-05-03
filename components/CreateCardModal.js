@@ -3,6 +3,8 @@ import { View, Text, Modal, TextInput, TouchableOpacity, StyleSheet, KeyboardAvo
 import { TOPICS } from '../model/Definitions';
 // Add 'getOrGenerateKeys' to the import
 import { signData, getOrGenerateKeys } from '../model/Security';
+import { getAllCards } from '../model/database';
+import { Feather } from '@expo/vector-icons';
 
 export default function CreateCardModal({ visible, onClose, onSave, initialData }) {
   // STATE
@@ -11,6 +13,8 @@ export default function CreateCardModal({ visible, onClose, onSave, initialData 
   const [topic, setTopic] = useState('general');
   const [subject, setSubject] = useState('');
   const [isSigning, setIsSigning] = useState(false);
+  const [allCards, setAllCards] = useState([]);
+  const [citations, setCitations] = useState([]);
 
   // POPULATE DATA ON OPEN (For Editing)
   useEffect(() => {
@@ -20,14 +24,22 @@ export default function CreateCardModal({ visible, onClose, onSave, initialData 
         setBody(initialData.body || '');
         setTopic(initialData.topic ? initialData.topic.replace('human/','') : 'general');
         setSubject(initialData.subject || '');
+        setCitations(initialData.citations || []);
       } else {
         setTitle('');
         setBody('');
         setTopic('general');
         setSubject('');
+        setCitations([]);
       }
+      // Load all cards for citations
+      getAllCards().then(setAllCards).catch(console.error);
     }
   }, [visible, initialData]);
+
+  const toggleCitation = (cardId) => {
+    setCitations(prev => prev.includes(cardId) ? prev.filter(id => id !== cardId) : [...prev, cardId]);
+  };
 
   const handleSave = async () => {
     if (!title || !body) return;
@@ -47,7 +59,8 @@ export default function CreateCardModal({ visible, onClose, onSave, initialData 
       subject,
       body_json: JSON.stringify({ content: body }), 
       type: 'narrative_markdown',
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      citations: citations
     };
 
     const signature = await signData(rawData);
@@ -127,6 +140,25 @@ export default function CreateCardModal({ visible, onClose, onSave, initialData 
             editable={!isSigning}
           />
 
+          <Text style={[styles.label, {marginTop: 20}]}>ATTACH RELATED EVIDENCE (CITATIONS)</Text>
+          <View style={{ height: 60 }}>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+              {allCards.map(c => {
+                const isSelected = citations.includes(c.id);
+                return (
+                  <TouchableOpacity 
+                    key={c.id} 
+                    style={[styles.citationChip, isSelected && styles.citationChipActive]}
+                    onPress={() => toggleCitation(c.id)}
+                  >
+                    {isSelected && <Feather name="check" size={12} color="#000" style={{marginRight: 4}} />}
+                    <Text style={[styles.citationText, isSelected && {color: '#000'}]}>{c.title}</Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+          </View>
+
           <View style={styles.btnRow}>
             <TouchableOpacity onPress={onClose} style={styles.btnCancel} disabled={isSigning}>
               <Text style={styles.btnTextGray}>CANCEL</Text>
@@ -160,5 +192,9 @@ const styles = StyleSheet.create({
   btnSave: { backgroundColor: '#00ff00', padding: 15, borderRadius: 5, flex: 1, alignItems: 'center', marginLeft: 10 },
   
   btnTextGray: { color: '#888', fontWeight: 'bold' },
-  btnTextBlack: { color: '#000', fontWeight: 'bold' }
+  btnTextBlack: { color: '#000', fontWeight: 'bold' },
+  
+  citationChip: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#222', paddingHorizontal: 12, paddingVertical: 8, borderRadius: 6, marginRight: 8, borderWidth: 1, borderColor: '#444' },
+  citationChipActive: { backgroundColor: '#F59E0B', borderColor: '#F59E0B' },
+  citationText: { color: '#aaa', fontSize: 11, fontFamily: 'Courier', maxWidth: 150 },
 });

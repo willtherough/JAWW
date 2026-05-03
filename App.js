@@ -15,6 +15,8 @@ import { Feather } from '@expo/vector-icons';
 // --- DATA & SERVICE IMPORTS ---
 import { loadLibrary, saveLibrary, loadProfile, saveProfile, saveTrustedSource, loadTrustedSources as fetchFromDB } from './model/Storage';
 import { INITIAL_SEEDS } from './utils/SeedData';
+import SynapseArenaModal from './components/SynapseArenaModal';
+
 import { TOPICS } from './model/Definitions';
 import { MASTER_LIBRARY, funLibrary } from './services/library/';
 import { getOrGenerateKeys, signData, verifyChain } from './model/Security';
@@ -41,6 +43,7 @@ import QRCode from 'react-native-qrcode-svg';
 import SyncStatusScreen from './components/SyncStatusScreen';
 import AnimatedQRTransfer from './components/AnimatedQRTransfer';
 import AirGapScanner from './components/AirGapScanner';
+import RosettaVerificationModal from './components/RosettaVerificationModal';
 import UmpireDashboardService from './services/UmpireDashboardService';
 
 const decodeVaultBitmask = (bitmask) => {
@@ -589,12 +592,13 @@ export default function App() {
   const [vaultCards, setVaultCards] = useState([]);
   const [profile, setProfile] = useState({ handle: null, publicKey: null });
   const [activeTab, setActiveTab] = useState('created');
-  const [activeTopicFilter, setActiveTopicFilter] = useState(null);
+  const [activeTopicFilter, setActiveTopicFilter] = useState('intel/news');
   const [viewMode, setViewMode] = useState('wheel');
   const [nearbyDevices, setNearbyDevices] = useState([]);
   const [activePeer, setActivePeer] = useState(null);
   const [selectedCard, setSelectedCard] = useState(null);
   const [cardToFork, setCardToFork] = useState(null);
+  const [isActionModalVisible, setIsActionModalVisible] = useState(false);
   const [isContextModalVisible, setIsContextModalVisible] = useState(false);
   const [chainCard, setChainCard] = useState(null);
   const [isCreateVisible, setIsCreateVisible] = useState(false);
@@ -602,7 +606,12 @@ export default function App() {
   const [airGapPayload, setAirGapPayload] = useState(null);
   const [isProfileVisible, setIsProfileVisible] = useState(false);
   const [isOracleVisible, setIsOracleVisible] = useState(false);
+  const [oracleInitialTab, setOracleInitialTab] = useState('VAULT');
+  const [oracleInitialSubModal, setOracleInitialSubModal] = useState(null);
+  const [autoOpenFlare, setAutoOpenFlare] = useState(false);
   const [isRosettaVisible, setIsRosettaVisible] = useState(false);
+  const [isRosettaVerificationVisible, setIsRosettaVerificationVisible] = useState(false);
+  const [currentScannedReceipt, setCurrentScannedReceipt] = useState(null);
   const [isTrustedModalVisible, setIsTrustedModalVisible] = useState(false);
   const [trustedSources, setTrustedSources] = useState([]);
   const [remoteCatalog, setRemoteCatalog] = useState(null);
@@ -630,11 +639,36 @@ export default function App() {
   const [isSyncScreenVisible, setIsSyncScreenVisible] = useState(false);
   const [groceryList, setGroceryList] = useState([]);
   const [syncBadges, setSyncBadges] = useState({}); // Holds { cardId: numberOfNewEntries }
+  const [isSynapseArenaVisible, setIsSynapseArenaVisible] = useState(false);
 
   // NEW: Unified JitterSync Engine State
   const [isJitterSyncActive, setIsJitterSyncActive] = useState(false);
   const jitterSyncLockRef = useRef(false);
   const jitterSyncDebounceRef = useRef(null);
+
+  // --- NEW: VERIFY CLAIM LOGIC ---
+  const handleVerifyClaim = async (claimCard) => {
+    if (!profile?.publicKey) {
+      Alert.alert("Identity Required", "You must create a profile to verify claims.");
+      return;
+    }
+    const verificationPayload = {
+      title: `VERIFIED: ${claimCard.title}`,
+      body: `I cryptographically verify the claim made by ${claimCard.author_id} in card ${claimCard.id}.`,
+      topic: claimCard.topic, // Inherit the domain
+      subject: 'VERIFICATION',
+      genesis: JSON.stringify({ target_card_id: claimCard.id }),
+      author: profile.handle,
+      author_id: profile.publicKey,
+    };
+    
+    await createCard(verificationPayload.title, verificationPayload.body, verificationPayload.topic, verificationPayload.subject, verificationPayload.genesis, verificationPayload.author, verificationPayload.author_id);
+    Alert.alert("Claim Verified", "You have vouched for this operator's expertise on the mesh.");
+    
+    // Trigger feed refresh
+    setSearchQuery(searchQuery + ' ');
+    setTimeout(() => setSearchQuery(searchQuery.trim()), 100);
+  };
 
   /**
    * THE PLUMBING: Universal Mesh Engine Trigger
@@ -848,21 +882,42 @@ export default function App() {
     // THE ZERO-CLICK MESH PING (Automated Genesis Hunt)
     // ==========================================
     const syncPingListener = DeviceEventEmitter.addListener('onSyncPingReceived', async (data) => {
-      const { cardId, senderHandle } = data;
+      const { cardId, senderHandle, newsTags } = data;
 
       console.log(`>> MESH: Caught background ping from ${senderHandle}. Waking up the Bouncer...`);
 
       try {
-        // 1. Check if we actually own this card before we waste radio power
-        const localCard = await getCardById(cardId);
-        if (!localCard) {
-          console.log(`>> MESH: Card not found locally. Ignoring ping.`);
-          return;
+        let syncedNews = false;
+        
+        // 1. ACTIVE NEWS RELAY CHECK
+        if (newsTags && newsTags.length > 0) {
+            console.log(`>> MESH: Sender is requesting News for frequencies: ${newsTags.join(', ')}`);
+            const allCards = await getAllCards();
+            const newsCards = allCards.filter(c => c.topic === 'intel/news');
+            
+            // Find a card that matches any of the requested tags
+            for (let card of newsCards) {
+                const cardContent = (card.title + " " + card.body).toLowerCase();
+                const hasMatch = newsTags.some(tag => cardContent.includes(tag.toLowerCase()));
+                if (hasMatch) {
+                    console.log(`>> MESH: Found matching News Card [${card.title}]. Pushing to sender!`);
+                    await BluetoothService.initiateMeshSync(senderHandle, card);
+                    syncedNews = true;
+                    break; // Only push one per ping to avoid flooding
+                }
+            }
         }
 
-        // 2. Fire the Phase 1 Security Challenge!
-        // initiateMeshSync internally handles the nonce and sends the REQ:CHALLENGE
-        await BluetoothService.initiateMeshSync(senderHandle, localCard);
+        // 2. STANDARD TARGETED CARD CHECK
+        if (!syncedNews) {
+            const localCard = await getCardById(cardId);
+            if (!localCard) {
+              console.log(`>> MESH: Target Card not found locally, and no News pushed. Ignoring ping.`);
+              return;
+            }
+            // Fire the Phase 1 Security Challenge!
+            await BluetoothService.initiateMeshSync(senderHandle, localCard);
+        }
 
       } catch (error) {
         console.error(">> MESH: Background Handshake Failed", error);
@@ -1340,49 +1395,46 @@ export default function App() {
     setIsRosettaVisible(false);
     
     if (receipt && receipt.items && receipt.items.length > 0) {
-      // Process the first item as a proof of concept for the stress test
-      const firstItem = receipt.items[0];
-      
-      Alert.alert(
-        "Receipt OCR Data Acquired",
-        `Parsed line item:\nStore: ${receipt.store}\nItem: "${firstItem.rawText}"\nPrice: $${firstItem.price}`,
-        [
-          { text: "Dismiss", style: "cancel" },
-          { 
-            text: "Map to 'Walnuts' (Master Card)", 
-            onPress: () => {
-              // 1. Create the ROSETTA_MAP Translation Card
-              const translationCard = {
-                title: `Rosetta: ${receipt.store} -> ${firstItem.rawText}`,
-                topic: 'human/general',
-                subject: `ROSETTA_MAP:${receipt.store.toUpperCase()}:${firstItem.rawText.toUpperCase()}`,
-                body: "Walnuts" // Points to the Master Card ID/Title
-              };
-              handleCreateCard(translationCard);
-
-              // 2. Create the PURCHASE Card for the Fridge / Mesh Economy
-              setTimeout(() => {
-                const purchaseCard = {
-                  title: `Purchase: Walnuts`,
-                  topic: 'human/finance',
-                  subject: `PURCHASE:WALNUTS`,
-                  body: JSON.stringify({
-                    store: receipt.store,
-                    rawText: firstItem.rawText,
-                    price: firstItem.price,
-                    quantity: firstItem.quantity,
-                    date: receipt.date
-                  })
-                };
-                handleCreateCard(purchaseCard);
-                
-                Alert.alert("Rosetta Pipeline Complete", `Created Translation and Purchase records. These are now broadcasting via the mesh! Check your FRIDGE tab.`);
-              }, 1000); // 1-second delay to ensure nonce generation doesn't collide
-            }
-          }
-        ]
-      );
+      setCurrentScannedReceipt(receipt);
+      setIsRosettaVerificationVisible(true);
     }
+  };
+
+  const handleRosettaVerifyComplete = (verifiedItems) => {
+    setIsRosettaVerificationVisible(false);
+    const store = currentScannedReceipt?.store || "UNKNOWN";
+    
+    verifiedItems.forEach((item, index) => {
+      // 1. Create Translation Card
+      const translationCard = {
+        title: `Rosetta: ${store} -> ${item.rawText}`,
+        topic: 'human/general',
+        subject: `ROSETTA_MAP:${store.toUpperCase()}:${item.rawText.toUpperCase()}`,
+        body: item.trueIngredient 
+      };
+      handleCreateCard(translationCard);
+
+      // 2. Create Fridge / Purchase Card
+      setTimeout(() => {
+        const purchaseCard = {
+          title: `${item.weight} ${item.unit} ${item.trueIngredient}`,
+          topic: 'human/nutrition',
+          subject: `FRIDGE:${item.trueIngredient.toUpperCase().replace(/\s+/g, '_')}`,
+          body: JSON.stringify({
+            store: store,
+            rawText: item.rawText,
+            trueIngredient: item.trueIngredient,
+            price: item.price,
+            weight: item.weight,
+            unit: item.unit,
+            date: currentScannedReceipt?.date || new Date().toISOString()
+          })
+        };
+        handleCreateCard(purchaseCard);
+      }, index * 1000 + 500); // Stagger to prevent nonce collision
+    });
+    
+    Alert.alert("Fridge Updated", `Successfully processed ${verifiedItems.length} items into your biological inventory.`);
   };
 
   const handleAddToGroceryList = (card) => {
@@ -1485,7 +1537,7 @@ export default function App() {
             // PHASE 2: LEDGER INTEGRITY VERIFICATION
             
             // 1. Verify Cryptographic Signatures
-            const isCryptoValid = verifyChain(card);
+            const isCryptoValid = verifyChain(card, true);
             let isDagValid = true;
 
             // 2. Verify DAG Parent Integrity
@@ -1880,7 +1932,9 @@ export default function App() {
         c.body,
         topicPath,
         c.subject,
-        profile.handle
+        profile.handle,
+        'standard',
+        c.citations || []
       );
 
       // 3. Apply the Event Stamp if we are in a mission
@@ -1918,7 +1972,7 @@ export default function App() {
   const handleOfferCard = async (card) => {
     // THE IRON GATE: Is Military Environment Active?
     if (typeof IS_MILITARY !== 'undefined' && IS_MILITARY) {
-      console.log(">> EMCON: Rerouting data to Zero-Emission Optical Transfer array.");
+      console.log(">> Sharing data via Animated QR.");
       setAirGapPayload(card);
       return;
     }
@@ -2370,8 +2424,30 @@ export default function App() {
 
 
   // --- UPDATED: HANDLES THE NEW QR & JSON LOGIC ---
-  const handleRealScan = async (dataString) => {
+  const handleRealScan = async (scannedData) => {
     if (isLoading) return; // Guard against multiple scans
+    
+    // 1. AIRGAP PAYLOAD (Object directly from AirGapScanner)
+    if (typeof scannedData === 'object' && scannedData !== null) {
+      if (scannedData.id && scannedData.title && scannedData.body) {
+        Alert.alert(
+          "Card Shared via QR", 
+          `Insert "${scannedData.title}" into the mesh ledger?`, 
+          [
+            { text: "Cancel", style: "cancel", onPress: () => setIsScannerVisible(false) }, 
+            { text: "Import", onPress: async () => {
+                setIsScannerVisible(false);
+                await processAndSaveIncomingCard(scannedData, scannedData.author_id, Date.now());
+                const freshCards = await getAllCards();
+                setCards(freshCards);
+            }}
+          ]
+        );
+      }
+      return;
+    }
+
+    const dataString = scannedData;
     if (typeof dataString !== 'string') return;
     console.log(">> SCANNER: Data received:", dataString);
 
@@ -2859,7 +2935,7 @@ export default function App() {
 
         // Bundle the current UI filters so the database respects the active view
         const currentFilters = {
-          activeTab,
+          activeTab: 'all', // Phase 4: Consolidated Feed
           activeTopicFilter,
           profileHandle: profile?.publicKey || 'unknown'
         };
@@ -2874,7 +2950,9 @@ export default function App() {
 
         // Only update the UI if this is the most recent keystroke/query
         if (isMounted) {
-          setCards(results);
+          // Hide system logs from the main dashboard views
+          const filteredResults = results.filter(c => c.subject !== 'NUTRITION_LOG' && c.subject !== 'WORKOUT_LOG');
+          setCards(filteredResults);
         }
       } catch (error) {
         console.error(">> ORACLE ERROR: SQLite Search failed:", error);
@@ -2886,7 +2964,7 @@ export default function App() {
       // Don't fetch if the DB isn't ready yet (The Titanium Chassis rule)
       if (isDbReady) {
         loadVaultData();
-      } // 🟢 FIXED: The missing bracket is restored
+      }
     }, 300);
 
     // Cleanup function runs when the user types a new letter
@@ -3062,11 +3140,14 @@ export default function App() {
     <SafeAreaView style={styles.container}>
       <StatusBar barStyle="light-content" />
       <View style={styles.topHeader}>
-        <TouchableOpacity onPress={toggleBroadcast} style={[styles.broadcastBtnCompact, isBroadcasting && { backgroundColor: '#003300', borderColor: '#00ff00' }]}>
-          <Text style={styles.broadcastText}>{isBroadcasting ? '(( ON AIR ))' : '📡 SYNC'}</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.btnSmallOutline} onPress={() => setIsTrustedModalVisible(true)}><Text style={styles.btnTextGray}>TRUSTED</Text></TouchableOpacity>
-        <Text style={styles.headerRank}>OP: {profile.handle.substring(0, 8).toUpperCase()}</Text>
+        <Text style={{ color: '#fff', fontSize: 24, fontWeight: 'bold' }}>JAWW</Text>
+        <View style={{ flexDirection: 'row', gap: 10 }}>
+
+          <TouchableOpacity onPress={() => setIsProfileVisible(true)} style={styles.btnSmallOutline}><Text style={styles.btnTextGray}>Profile</Text></TouchableOpacity>
+          <TouchableOpacity onPress={toggleBroadcast} style={[styles.broadcastBtnCompact, isBroadcasting && { backgroundColor: '#003300', borderColor: '#00ff00' }]}>
+            <Text style={styles.broadcastText}>{isBroadcasting ? 'ON AIR' : 'SYNC'}</Text>
+          </TouchableOpacity>
+        </View>
       </View>
 
       {viewMode === 'broadcast' ? (
@@ -3080,50 +3161,52 @@ export default function App() {
         <View style={{ flex: 1 }}>
           <TacticalScanner devices={filteredDevices} onNodeTap={handleRadarConnect} isScanning={isScanning} />
           <View style={{ position: 'absolute', bottom: 0, left: 0, right: 0 }}>
-            <FlareBeacon onFireFlare={fireMeshFlare} isBroadcasting={isBroadcasting} />
+            <FlareBeacon onFireFlare={fireMeshFlare} isBroadcasting={isBroadcasting} autoOpen={autoOpenFlare} onClose={() => setAutoOpenFlare(false)} />
           </View>
         </View>
       ) : (
         <>
-          <View style={{ minHeight: 60, alignItems: 'center' }}>
-            {/* 1. Resting State Button (replaces the old shrink/expand text) */}
-            <TouchableOpacity
-              onPress={() => setIsWheelShrunk(v => !v)}
-              style={styles.wheelToggleButton}
-            >
-              <Text style={styles.wheelToggleText}>
-                {activeTopicFilter ? 'FILTER: ' + activeTopicFilter.toUpperCase() : 'SELECT CATEGORY'}
-              </Text>
-              <Text style={styles.wheelToggleIcon}>{isWheelShrunk ? '▼' : '▲'}</Text>
-            </TouchableOpacity>
+          {/* TIER 1 & TIER 2: Dashboard Controls */}
+          {!IS_MILITARY && (
+            <View style={{ paddingHorizontal: 20, paddingTop: 15, paddingBottom: 5, alignItems: 'center' }}>
+              <TouchableOpacity style={{ backgroundColor: '#1E293B', borderColor: '#38BDF8', borderWidth: 1, borderRadius: 25, flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 10, paddingVertical: 12, paddingHorizontal: 25, shadowColor: '#38BDF8', shadowOpacity: 0.2, shadowRadius: 5, shadowOffset: { width: 0, height: 2 }, elevation: 3 }} onPress={() => setIsActionModalVisible(true)}>
+                <Feather name="grid" size={18} color="#38BDF8" />
+                <Text style={{ color: '#F8FAFC', fontWeight: 'bold', textAlign: 'center', fontSize: 16 }}>Take Action</Text>
+              </TouchableOpacity>
+            </View>
+          )}
 
-            {/* 2. Expanded, Floating Wheel */}
-            {!isWheelShrunk && (
-              <View style={styles.wheelContainer}>
-                <Pressable onPress={handleWheelTap} style={{ width: 380, height: 380 }}>
-                  <Svg height={380} width={380}>
-                    <Circle cx={190} cy={190} r={180} fill="none" stroke="#333" />
-                    {SECTIONS.map((s) => {
-                      const isSelected = activeTopicFilter === s.id;
-                      const path = describeArc(190, 190, 180 - 5, s.angle + 2, s.angle + 70);
-                      const labelPos = polarToCartesian(190, 190, 180 - 40, s.angle + 36);
-                      return (
-                        <G key={s.id}>
-                          <Path d={path} fill={expertise[s.id] ? '#336633' : '#1a1a1a'} stroke={isSelected ? '#fff' : 'none'} />
-                          <SvgText x={labelPos.x} y={labelPos.y} fill="#fff" fontSize="12" textAnchor="middle">{s.label}</SvgText>
-                        </G>
-                      );
-                    })}
-                    <Circle cx={190} cy={190} r={55} fill="#000" stroke="#333" />
-                    <SvgText x={190} y={190} fill="#fff" fontSize={14} textAnchor="middle">{profile.handle.toUpperCase()}</SvgText>
-                  </Svg>
-                </Pressable>
-              </View>
+          {/* TIER 3: Content Feed */}
+          <View style={{ paddingVertical: 15, borderBottomWidth: 1, borderBottomColor: '#222' }}>
+            {activeTopicFilter === 'intel/news' ? (
+                <View style={{ flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 8, marginBottom: 15 }}>
+                    <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: '#00ff00', shadowColor: '#00ff00', shadowOpacity: 0.8, shadowRadius: 5, elevation: 3 }} />
+                    <Text style={{ color: '#00ff00', fontSize: 13, fontWeight: 'bold', letterSpacing: 1, fontFamily: 'Courier New' }}>
+                        LIVE INTELLIGENCE FEED
+                    </Text>
+                    <TouchableOpacity onPress={() => setIsOracleVisible(true)} style={{ marginLeft: 5, padding: 5 }}>
+                        <Feather name="sliders" size={16} color="#00ff00" />
+                    </TouchableOpacity>
+                </View>
+            ) : (
+                <Text style={{ color: '#94A3B8', fontSize: 13, textAlign: 'center', marginBottom: 15, fontWeight: '500' }}>
+                  Your card collection below.
+                </Text>
             )}
-          </View>
-          <View style={styles.tabContainer}>
-            <TouchableOpacity onPress={() => setActiveTab('created')} style={[styles.tab, activeTab === 'created' && styles.activeTab]}><Text style={styles.tabText}>MY KNOWLEDGE</Text></TouchableOpacity>
-            <TouchableOpacity onPress={() => setActiveTab('learned')} style={[styles.tab, activeTab === 'learned' && styles.activeTab]}><Text style={styles.tabText}>LEARNED</Text></TouchableOpacity>
+            
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: 15, gap: 10 }}>
+              <TouchableOpacity onPress={() => setActiveTopicFilter('intel/news')} style={[styles.filterChip, activeTopicFilter === 'intel/news' && styles.filterChipActive]}>
+                <Text style={[styles.filterChipText, activeTopicFilter === 'intel/news' && styles.filterChipTextActive]}>LIVE FEED</Text>
+              </TouchableOpacity>
+              <TouchableOpacity onPress={() => setActiveTopicFilter(null)} style={[styles.filterChip, !activeTopicFilter && styles.filterChipActive]}>
+                <Text style={[styles.filterChipText, !activeTopicFilter && styles.filterChipTextActive]}>VAULT</Text>
+              </TouchableOpacity>
+              {SECTIONS.filter(s => s.id !== 'intel/news').map((s) => (
+                <TouchableOpacity key={s.id} onPress={() => setActiveTopicFilter(s.id === activeTopicFilter ? null : s.id)} style={[styles.filterChip, activeTopicFilter === s.id && styles.filterChipActive]}>
+                  <Text style={[styles.filterChipText, activeTopicFilter === s.id && styles.filterChipTextActive]}>{s.label}</Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
           </View>
           <FlatList
             data={cards}
@@ -3137,6 +3220,7 @@ export default function App() {
                   item={augmentedItem}
                   activeUmpireEvent={activeUmpireEvent}
                   manualUmpireSubmit={manualUmpireSubmit}
+                  onVerifyClaim={handleVerifyClaim}
                   onPress={() => setSelectedCard(item)}
                   onLongPress={() => {
                     Alert.alert(
@@ -3417,35 +3501,32 @@ export default function App() {
         onSave={handleCreateCard}
         initialData={createInitialData} // <--- PASS THE DATA HERE
       />
-      {IS_MILITARY ? (
-        <AirGapScanner
-          visible={isScannerVisible}
-          onClose={() => setIsScannerVisible(false)}
-          onTransferComplete={handleRealScan}
-        />
-      ) : (
-        <ScannerModal
-          visible={isScannerVisible}
-          onClose={() => setIsScannerVisible(false)}
-          onScanSuccess={handleRealScan}
-        />
-      )}
+      <AirGapScanner
+        visible={isScannerVisible}
+        onClose={() => setIsScannerVisible(false)}
+        onTransferComplete={handleRealScan}
+      />
       
-      <RosettaScannerModal
+      <AirGapScanner
         visible={isRosettaVisible}
         onClose={() => setIsRosettaVisible(false)}
-        onScanComplete={handleRosettaScan}
+        onTransferComplete={handleRosettaScan}
       />
 
-      {/* Military Air-Gap Transmitter Modal */}
-      {IS_MILITARY && (
-        <Modal visible={!!airGapPayload} transparent={true} animationType="fade">
-          <AnimatedQRTransfer
-            payload={airGapPayload}
-            onClose={() => setAirGapPayload(null)}
-          />
-        </Modal>
-      )}
+      <RosettaVerificationModal
+        visible={isRosettaVerificationVisible}
+        receipt={currentScannedReceipt}
+        onClose={() => setIsRosettaVerificationVisible(false)}
+        onVerifyComplete={handleRosettaVerifyComplete}
+      />
+
+      {/* Air-Gap Transmitter Modal */}
+      <Modal visible={!!airGapPayload} transparent={true} animationType="fade">
+        <AnimatedQRTransfer
+          payload={airGapPayload}
+          onClose={() => setAirGapPayload(null)}
+        />
+      </Modal>
       <TrustedSourcesModal
         visible={isTrustedModalVisible}
         onClose={() => setIsTrustedModalVisible(false)}
@@ -3459,7 +3540,9 @@ export default function App() {
       />
       <OracleModal
         visible={isOracleVisible}
-        onClose={() => setIsOracleVisible(false)}
+        initialTab={oracleInitialTab}
+        initialSubModal={oracleInitialSubModal}
+        onClose={() => { setIsOracleVisible(false); setOracleInitialSubModal(null); }}
         masterLibrary={MASTER_LIBRARY}
         funLibrary={funLibrary}
         groceryList={groceryList}
@@ -3469,6 +3552,14 @@ export default function App() {
         }}
         onEndEvent={handleEndEvent}
         refreshTrigger={refreshTrigger}
+        onCreateNewWorkout={() => {
+          setIsOracleVisible(false);
+          setOracleInitialSubModal(null);
+          setTimeout(() => {
+            setCreateInitialData({ subject: 'Workouts', topic: 'human/fitness', title: '' });
+            setIsCreateVisible(true);
+          }, 300);
+        }}
         // This handler makes the footer buttons work
         onNavigate={(route) => {
           setIsOracleVisible(false); // Close Oracle first
@@ -3488,6 +3579,16 @@ export default function App() {
         onReset={async () => { await AsyncStorage.clear(); }}
         onClearLibrary={handleClearLibrary}
         onStartNewEvent={handleNewUmpireOperation}
+        onEnterArena={() => {
+          setIsProfileVisible(false);
+          setTimeout(() => setIsSynapseArenaVisible(true), 300);
+        }}
+      />
+      <SynapseArenaModal 
+        visible={isSynapseArenaVisible}
+        onClose={() => setIsSynapseArenaVisible(false)}
+        profile={profile}
+        localLibrary={cards}
       />
       <UmpireEventModal
         visible={isUmpireEventModalVisible}
@@ -3515,6 +3616,7 @@ export default function App() {
         }}
         onBlockOperator={handleBlockOperator}
         onOffer={handleOfferCard}
+        onAirGapTransfer={(card) => setAirGapPayload(card)}
         onAddToGroceryList={handleAddToGroceryList}
       />
       <TransferRequestModal
@@ -3580,6 +3682,51 @@ export default function App() {
           await BluetoothService.stopBroadcasting().catch(() => { }); // Turns off the Beacon
         }}
       />
+      {isActionModalVisible && (
+        <View style={{ position: 'absolute', top: 0, bottom: 0, left: 0, right: 0, zIndex: 9999, backgroundColor: 'rgba(15, 23, 42, 0.95)', justifyContent: 'center', padding: 20 }}>
+          <View style={{ backgroundColor: '#1E293B', padding: 20, borderRadius: 20, borderWidth: 1, borderColor: '#334155' }}>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+              <Text style={{ color: '#F8FAFC', fontSize: 20, fontWeight: 'bold' }}>Action Menu</Text>
+              <TouchableOpacity onPress={() => setIsActionModalVisible(false)}>
+                <Feather name="x" size={24} color="#9CA3AF" />
+              </TouchableOpacity>
+            </View>
+
+            <Text style={{ color: '#94A3B8', fontSize: 12, marginBottom: 10, fontWeight: 'bold' }}>THE POWER OF THE CLOUD AT YOUR FINGERTIPS.</Text>
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginBottom: 20 }}>
+              <TouchableOpacity style={[styles.btnActionPrimary, { flex: 1, minWidth: '45%', backgroundColor: '#38BDF8', borderColor: '#38BDF8', flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 6 }]} onPress={() => { setIsActionModalVisible(false); handleNewUmpireOperation(); }}>
+                <Feather name="play-circle" size={16} color="#FFF" />
+                <Text style={{ color: '#fff', fontWeight: 'bold', textAlign: 'center' }}>Start Event</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.btnActionPrimary, { flex: 1, minWidth: '45%', backgroundColor: '#334155', borderColor: '#334155', flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 6 }]} onPress={() => { setIsActionModalVisible(false); setViewMode('radar'); }}>
+                <Feather name="compass" size={16} color="#FFF" />
+                <Text style={{ color: '#fff', fontWeight: 'bold', textAlign: 'center' }}>Discover</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.btnActionPrimary, { flex: 1, minWidth: '45%', backgroundColor: '#334155', borderColor: '#334155', flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 6 }]} onPress={() => { setIsActionModalVisible(false); setViewMode('radar'); setAutoOpenFlare(true); }}>
+                <Feather name="message-circle" size={16} color="#FFF" />
+                <Text style={{ color: '#fff', fontWeight: 'bold', textAlign: 'center' }}>Ask Room</Text>
+              </TouchableOpacity>
+            </View>
+
+            <Text style={{ color: '#94A3B8', fontSize: 12, marginBottom: 10, fontWeight: 'bold' }}>QUICK LOGGING</Text>
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginBottom: 10 }}>
+              <TouchableOpacity style={[styles.btnActionSecondary, { flex: 1, minWidth: '45%', borderColor: '#10B981', flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 10 }]} onPress={() => { setIsActionModalVisible(false); setOracleInitialTab('HEALTH'); setOracleInitialSubModal('MEAL_PLANNER'); setIsOracleVisible(true); }}>
+                <Feather name="coffee" size={16} color="#10B981" />
+                <Text style={{ color: '#10B981', fontWeight: 'bold' }}>+ Add Meal</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.btnActionSecondary, { flex: 1, minWidth: '45%', borderColor: '#F59E0B', flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 10 }]} onPress={() => { setIsActionModalVisible(false); setOracleInitialTab('HEALTH'); setOracleInitialSubModal('WORKOUT_LOGGER'); setIsOracleVisible(true); }}>
+                <Feather name="activity" size={16} color="#F59E0B" />
+                <Text style={{ color: '#F59E0B', fontWeight: 'bold' }}>+ Log Workout</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.btnActionSecondary, { flex: 1, minWidth: '45%', borderColor: '#A855F7', flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 10 }]} onPress={() => { setIsActionModalVisible(false); setCreateInitialData({ subject: 'CLAIM', topic: 'human/general' }); setIsCreateVisible(true); }}>
+                <Feather name="award" size={16} color="#A855F7" />
+                <Text style={{ color: '#A855F7', fontWeight: 'bold' }}>+ Claim Cred</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      )}
+
     </SafeAreaView>
   );
 }
@@ -3670,6 +3817,26 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#333',
     marginVertical: 10,
+  },
+  filterChip: {
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 20,
+    backgroundColor: '#222',
+    borderWidth: 1,
+    borderColor: '#333',
+  },
+  filterChipActive: {
+    backgroundColor: '#00ff00',
+    borderColor: '#00ff00',
+  },
+  filterChipText: {
+    color: '#888',
+    fontWeight: 'bold',
+  },
+  filterChipTextActive: {
+    color: '#000',
+    fontWeight: 'bold',
   },
   wheelToggleText: {
     color: '#00ff00',

@@ -2,10 +2,16 @@ import React, { useState, useRef, useEffect } from 'react';
 import { View, TextInput, TouchableOpacity, Text, StyleSheet, Keyboard, Modal, Platform } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 
-const FlareBeacon = ({ onFireFlare, isBroadcasting }) => {
+const FlareBeacon = ({ onFireFlare, isBroadcasting, autoOpen = false, onClose = () => {} }) => {
   const [flareText, setFlareText] = useState('');
-  const [isModalVisible, setIsModalVisible] = useState(false);
+  const [isModalVisible, setIsModalVisible] = useState(autoOpen);
   const inputRef = useRef(null);
+
+  useEffect(() => {
+    if (autoOpen && !isBroadcasting) {
+      setIsModalVisible(true);
+    }
+  }, [autoOpen, isBroadcasting]);
 
   useEffect(() => {
     if (isModalVisible) {
@@ -22,6 +28,7 @@ const FlareBeacon = ({ onFireFlare, isBroadcasting }) => {
       setFlareText('');
       Keyboard.dismiss();
       setIsModalVisible(false);
+      onClose();
     }
   };
 
@@ -35,6 +42,7 @@ const FlareBeacon = ({ onFireFlare, isBroadcasting }) => {
     Keyboard.dismiss();
     setIsModalVisible(false);
     setFlareText('');
+    onClose();
   }
 
   return (

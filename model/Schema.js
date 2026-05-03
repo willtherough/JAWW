@@ -80,7 +80,7 @@ export const buildLedgerEntry = ({ action, fromKey, toKey, senderHandle, recipie
 };
 
 // --- 6. THE CARD CONSTRUCTOR ---
-export const createCard = async (authorPublicKey, title, body, topicPath, subject, authorHandle, type = 'standard') => {
+export const createCard = async (authorPublicKey, title, body, topicPath, subject, authorHandle, type = 'standard', citations = []) => {
   if (!authorPublicKey) throw new Error("A cryptographic public key is required to author intel.");
   if (!authorHandle || authorHandle === "Unknown") throw new Error("A permanent handle is required to author intel.");
 
@@ -145,7 +145,8 @@ export const createCard = async (authorPublicKey, title, body, topicPath, subjec
     },
     hops: 1,
     hop_count: 1,
-    fork_depth: 0
+    fork_depth: 0,
+    citations: citations
   };
 };
 
@@ -173,7 +174,7 @@ export const createIdentityCard = (profile, publicKey) => {
 };
 
 // --- 8. KNOWLEDGE FORK ---
-export const forkCard = async (originalCard, contextNote, userProfile) => {
+export const forkCard = async (originalCard, contextNote, userProfile, extraCitations = []) => {
   if (!userProfile.handle || userProfile.handle === "Unknown") throw new Error("A permanent handle is required to fork intel.");
   // 1. Deep copy the card so we don't accidentally mutate the original in memory
   const newCard = JSON.parse(JSON.stringify(originalCard));
@@ -209,6 +210,17 @@ export const forkCard = async (originalCard, contextNote, userProfile) => {
   newCard.hops = newCard.history.length;
   newCard.hop_count = newCard.history.length;
   newCard.fork_depth = (newCard.fork_depth || 0) + 1;
+
+  // 7. Impact Chain: Automatically cite the original card if not present, plus any extras
+  newCard.citations = newCard.citations || [];
+  if (!newCard.citations.includes(originalCard.id)) {
+      newCard.citations.push(originalCard.id);
+  }
+  if (extraCitations && extraCitations.length > 0) {
+      extraCitations.forEach(c => {
+          if (!newCard.citations.includes(c)) newCard.citations.push(c);
+      });
+  }
 
   return newCard;
 };
