@@ -436,6 +436,13 @@ const onCardReceived = async (requestString) => {
         }
 
         if (cardToSend) {
+            // THE FIREWALL: Prevent AI-generated cards from being served
+            if ((cardToSend.author && cardToSend.author.includes('(Oracle AI)')) || (cardToSend.topic && cardToSend.topic.toLowerCase() === 'ai')) {
+                console.error(">> FIREWALL: Blocked outgoing AI-generated card.");
+                sendCardInChunks({ error: "BLOCKED_AI_CARD" });
+                return;
+            }
+
             const keys = await getOrGenerateKeys();
             cardToSend.senderPublicKey = keys.publicKey;
             DeviceEventEmitter.emit('pendingTransfer', {
@@ -454,6 +461,17 @@ import WifiMeshService from './WifiMeshService';
 
 const sendCardInChunks = async (deviceId, card) => {
     const actualCard = card || deviceId; 
+
+    // === FORCE PROPER SERIALIZATION ===
+    // If SQLite double-stringified these, we must correct them before network transit
+    if (actualCard) {
+        if (typeof actualCard.genesis === 'string') {
+            try { actualCard.genesis = JSON.parse(actualCard.genesis); } catch(e){}
+        }
+        if (typeof actualCard.history === 'string') {
+            try { actualCard.history = JSON.parse(actualCard.history); } catch(e){}
+        }
+    }
 
     // === DIAGNOSTIC PAYLOAD INTERCEPT ===
     console.log(`\n📡 >> TRANSMITTING PAYLOAD FROM GATT SERVER`);

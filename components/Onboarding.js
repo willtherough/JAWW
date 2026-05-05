@@ -197,6 +197,9 @@ export default function Onboarding({ visible, onComplete }) {
               multiline
               autoCapitalize="none"
               autoCorrect={false}
+              autoComplete="off"
+              keyboardType="visible-password"
+              textContentType="none"
               value={recoveryInput} 
               onChangeText={setRecoveryInput} 
               placeholder="word1 word2 word3..." 

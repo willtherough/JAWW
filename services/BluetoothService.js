@@ -275,30 +275,7 @@ const truncateToSafeBytes = (str, maxBytes) => {
             try {
                 let extendedSuccess = false;
                 
-                // PHASE 2: BLE 5.0 EXTENDED ADVERTISING ATTEMPT
-                if (Platform.OS === 'android') {
-                    try {
-                        const { SourceGattModule } = NativeModules;
-                        if (SourceGattModule && SourceGattModule.startExtendedAdvertising) {
-                            let extendedPayloadString = "";
-                            if (advertisedCard) {
-                                const safeTitle = (advertisedCard.title || '').replace(/\|/g, '-').substring(0, 50);
-                                const safeTopic = (advertisedCard.classification || '').replace(/\|/g, '-').substring(0, 30);
-                                const bodySnippet = (advertisedCard.body || '').replace(/\|/g, '-').substring(0, 80);
-                                extendedPayloadString = `EXT:${handlePortion}|${safeTopic}|${safeTitle}|${bodySnippet}`;
-                            } else {
-                                extendedPayloadString = `EXT:${handlePortion}|${subject || 'General'}|Broadcast|No active card`;
-                            }
-                            
-                            const extPayloadBase64 = Buffer.from(extendedPayloadString, 'utf8').toString('base64');
-                            await SourceGattModule.startExtendedAdvertising(extPayloadBase64);
-                            extendedSuccess = true;
-                            console.log(`>> IRONCLAD V2 (EXTENDED): ON. Payload length: ${extendedPayloadString.length}`);
-                        }
-                    } catch (e) {
-                        console.log(">> IRONCLAD V2: Extended Advertising unsupported. Falling back to Legacy.");
-                    }
-                }
+                // PHASE 2: EXTENDED ADVERTISING HAS BEEN REMOVED TO ENSURE DISCOVERY COMPATIBILITY
 
                 // FALLBACK TO LEGACY 31-BYTE ADVERTISING
                 if (!extendedSuccess) {
@@ -320,12 +297,8 @@ const truncateToSafeBytes = (str, maxBytes) => {
 
         async stopBroadcasting(silent = false) {
             try {
-                if (Platform.OS === 'android') {
-                    const { SourceGattModule } = NativeModules;
-                    if (SourceGattModule && SourceGattModule.stopExtendedAdvertising) {
-                        await SourceGattModule.stopExtendedAdvertising();
-                    }
-                }
+                // EXTENDED ADVERTISING HAS BEEN REMOVED
+
                 await BLEAdvertiser.stopBroadcast();
                 this.isBroadcasting = false;
                 if (!silent) {
@@ -616,14 +589,14 @@ const truncateToSafeBytes = (str, maxBytes) => {
                         const chunk = requestString.slice(offset, offset + CHUNK_SIZE);
                         const payload = Buffer.from(chunk).toString('base64');
                         await device.writeCharacteristicWithoutResponseForService(
-                            cleanServiceUUID, cleanCharUUID, payload
+                            targetService.uuid, cleanCharUUID, payload
                         );
                         offset += CHUNK_SIZE;
                         await new Promise(r => setTimeout(r, 600)); 
                     }
                     
                     await device.writeCharacteristicWithoutResponseForService(
-                        cleanServiceUUID, cleanCharUUID, Buffer.from('__EOF__').toString('base64')
+                        targetService.uuid, cleanCharUUID, Buffer.from('__EOF__').toString('base64')
                     );
                     console.log(">> MESH SYNC: Payload transmitted. Awaiting return ping...");
 
@@ -839,8 +812,8 @@ const truncateToSafeBytes = (str, maxBytes) => {
                                             const responseType = isRedundant ? 'HANDSHAKE:NACK' : 'HANDSHAKE:ACK';
                                             console.log(`>> CLIENT: Validation complete. Responding with ${responseType}`);
                                             const responsePayload = Buffer.from(responseType).toString('base64');
-                                            await device.writeCharacteristicWithResponseForService(
-                                                cleanServiceUUID, cleanCharUUID, responsePayload
+                                            await device.writeCharacteristicWithoutResponseForService(
+                                                targetService.uuid, cleanCharUUID, responsePayload
                                             );
 
                                             // GRACEFULLY ABORT IF REDUNDANT
@@ -900,27 +873,43 @@ const truncateToSafeBytes = (str, maxBytes) => {
                                     }
 
                                     const timestamp = Date.now();
-                                    const actualId = card.id || 'unknown_id';
-                                    const receipt = `${actualId}:${timestamp}:${myHandle}`;
-                                    const signature = await signData(receipt);
-                                    const keys = await getOrGenerateKeys();
+                                    
+                                    const sendAck = async () => {
+                                        try {
+                                            const actualId = card.id || 'unknown_id';
+                                            const receipt = `${actualId}:${timestamp}:${myHandle}`;
+                                            const signature = await signData(receipt);
+                                            const keys = await getOrGenerateKeys();
 
-                                    if (signature && keys) {
-                                        const ackData = { receipt, signature, publicKey: keys.publicKey };
-                                        const ackString = `REQ:ACK:${JSON.stringify(ackData)}`;
-                                        const ackPayload = Buffer.from(ackString).toString('base64');
-                                        await device.writeCharacteristicWithoutResponseForService(
-                                            cleanServiceUUID,
-                                            cleanCharUUID,
-                                            ackPayload
-                                        );
-                                        console.log(`>> CLIENT: Sent SIGNED ACK for card ${card.id}`);
-                                    }
+                                            if (signature && keys) {
+                                                const ackData = { receipt, signature, publicKey: keys.publicKey };
+                                                const ackString = `REQ:ACK:${JSON.stringify(ackData)}`;
+                                                const ackPayload = Buffer.from(ackString).toString('base64');
+                                                await device.writeCharacteristicWithoutResponseForService(
+                                                    cleanServiceUUID,
+                                                    cleanCharUUID,
+                                                    ackPayload
+                                                );
+                                                console.log(`>> CLIENT: Sent SIGNED ACK for card ${card.id}`);
+                                            }
+                                        } catch (e) {
+                                            console.error(">> CLIENT: Failed to send ACK:", e);
+                                        } finally {
+                                            this.updateState('DATA_RECEIVED');
+                                            clearTimeout(connectionTimeout);
+                                            await cleanup();
+                                        }
+                                    };
 
-                                    this.updateState('DATA_RECEIVED');
-                                    clearTimeout(connectionTimeout);
-                                    resolve({ success: true, data: { card, timestamp } });
-                                    await cleanup();
+                                    const cancelTransfer = async () => {
+                                        console.log(`>> CLIENT: Transfer cancelled by validation layer. Tearing down connection without ACK.`);
+                                        this.updateState('IDLE');
+                                        clearTimeout(connectionTimeout);
+                                        await cleanup();
+                                    };
+
+                                    // Resolve and pass the connection closure callbacks to the UI layer
+                                    resolve({ success: true, data: { card, timestamp }, sendAck, cancelTransfer });
 
                                 } catch (parseError) {
                                     console.error(">> CLIENT: JSON Parse Error", parseError);
@@ -958,12 +947,16 @@ const truncateToSafeBytes = (str, maxBytes) => {
                         }
                     );
 
+                    // Ensure the CCCD descriptor write has time to complete on the native bridge 
+                    // before we write the handshake, otherwise the server's notification will be dropped!
+                    await new Promise(r => setTimeout(r, 500));
+
                     const handshakePayload = Buffer.from(`REQ:HANDSHAKE:${myEphPub}`).toString('base64');
-                    await device.writeCharacteristicWithResponseForService(cleanServiceUUID, cleanHandshakeUUID, handshakePayload);
+                    await device.writeCharacteristicWithoutResponseForService(targetService.uuid, cleanHandshakeUUID, handshakePayload);
 
                     // Wait for handshake ACK
                     let handshakeRetries = 0;
-                    while (!sharedSecretEstablished && handshakeRetries < 20) {
+                    while (!sharedSecretEstablished && handshakeRetries < 50) {
                         await new Promise(r => setTimeout(r, 100));
                         handshakeRetries++;
                     }
@@ -981,7 +974,7 @@ const truncateToSafeBytes = (str, maxBytes) => {
                     // For the Phase 1 Foundation, we transmit the plaintext after successfully verifying the Handshake pipe works.
                     const requestPayload = Buffer.from(requestString).toString('base64');
                     
-                    await device.writeCharacteristicWithResponseForService(
+                    await device.writeCharacteristicWithoutResponseForService(
                         cleanServiceUUID,
                         cleanCharUUID,
                         requestPayload
@@ -1027,7 +1020,7 @@ const truncateToSafeBytes = (str, maxBytes) => {
                 const requestString = `REQ:STAT_PAYLOAD:${JSON.stringify(statsPayload)}`;
                 const requestPayload = Buffer.from(requestString).toString('base64');
                 
-                await device.writeCharacteristicWithResponseForService(
+                await device.writeCharacteristicWithoutResponseForService(
                     service.uuid,
                     TRANSFER_CHAR_UUID,
                     requestPayload
@@ -1067,6 +1060,12 @@ const truncateToSafeBytes = (str, maxBytes) => {
                 if (!service) throw new Error("Umpire GATT service not found.");
 
                 for (const card of cardsToTransfer) {
+                    // THE FIREWALL: Prevent AI-generated cards from being sent to Umpire
+                    if ((card.author && card.author.includes('(Oracle AI)')) || (card.topic && card.topic.toLowerCase() === 'ai')) {
+                        console.warn(`>> UMPIRE SYNC: Skipping AI-generated card (${card.id}).`);
+                        continue;
+                    }
+
                     const requestString = `REQ:UMPIRE_PUSH:${myHandle}:${JSON.stringify(card)}`;
                     
                     const CHUNK_SIZE = 300; 

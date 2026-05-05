@@ -734,6 +734,17 @@ export const getCardsByTopic = async (topicSubstring) => {
 
 export const insertOrReplaceCard = async (card) => {
   try {
+    // 🛡️ THE LEDGER SHIELD: Prevent corrupted state overwrites
+    if (!card || !card.id || !card.title || !card.genesis) {
+      console.error(">> FATAL DB ERROR: Attempted to insert corrupted card state. Aborting overwrite.", {
+        hasCard: !!card,
+        hasId: !!card?.id,
+        hasTitle: !!card?.title,
+        hasGenesis: !!card?.genesis
+      });
+      return;
+    }
+
     // Calculate the DAG-based depth score before inserting
     const depthScore = calculateDepthScore(card.history);
 

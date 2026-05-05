@@ -1973,7 +1973,10 @@ export default function App() {
     // THE IRON GATE: Is Military Environment Active?
     if (typeof IS_MILITARY !== 'undefined' && IS_MILITARY) {
       console.log(">> Sharing data via Animated QR.");
-      setAirGapPayload(card);
+      setAirGapPayload({
+        handle: profile?.handle || 'Unknown',
+        cardId: card.id
+      });
       return;
     }
 
@@ -1997,20 +2000,20 @@ export default function App() {
     if (!verifyChain(incomingCard)) {
       console.error(">> SECURITY ALERT: Incoming card failed chain verification. Aborting.");
       Alert.alert("Transfer Failed", "The received intel appears to be corrupted or tampered with. The transfer has been rejected.");
-      return;
+      return false;
     }
 
     // 1. THE SHIELD: Validate incoming payload integrity
     if (!incomingCard || !incomingCard.id || !Array.isArray(incomingCard.history) || incomingCard.history.length === 0) {
       Alert.alert("Transfer Corrupted", "Received card with invalid or missing history. Aborting.");
-      return;
+      return false;
     }
 
     // Gatekeeper: Ensure all parties have public keys before proceeding.
     if (!profile.publicKey || !incomingCard.senderPublicKey) {
       console.error(">> SECURITY ALERT: Missing public key in incoming card. Aborting save.");
       Alert.alert("Transfer Failed", "Missing security credentials from sender or receiver.");
-      return;
+      return false;
     }
 
     try {
@@ -2059,7 +2062,7 @@ export default function App() {
           // 2. The Redundancy Check
           if (mergedHistory.length <= localCard.history.length) {
             Alert.alert("Redundant Intel", "Your ledger is already up-to-date.");
-            return;
+            return false;
           }
 
           // 3. Hop Recalculation (Correct & Idempotent)
@@ -2097,7 +2100,13 @@ export default function App() {
         // Save to DB and refresh UI
         await insertOrReplaceCard(cardToSave);
 
-        broadcastGossipSync(cardToSave, profile?.handle);
+        // --- GOSSIP SYNC DELAY ---
+        // Delaying gossip by 3 seconds ensures that the current active BLE connection 
+        // can successfully transmit the ACK and safely teardown before the gossip engine
+        // attempts to establish new connections (which may target the same device).
+        setTimeout(() => {
+          broadcastGossipSync(cardToSave, profile?.handle);
+        }, 3000);
 
         // --- UI DEBOUNCE TO PREVENT ANDROID CRASH ---
         console.log(">> UI: Background P2P Sync Debouncing...");
@@ -2117,12 +2126,17 @@ export default function App() {
             }
           } catch (e) { }
         });
+        
+        return true;
       }
 
     } catch (error) {
       console.error(">> FATAL: processAndSaveIncomingCard Error:", error);
       Alert.alert("Save Error", "Could not process incoming intel.");
+      return false;
     }
+    
+    return false;
   };
 
   // --- ENGINE 3: THE GRABBER (Retry Logic + Smart Library) ---
@@ -2159,7 +2173,9 @@ export default function App() {
     while (attempts < 3 && !success) {
       attempts++;
       if (attempts > 1) console.log(`>> CLIENT: Connection Attempt ${attempts}/3...`);
-      result = await BluetoothService.connectAndRequest(targetId, 'CAT', categoryToRequest, profile.handle, profile.publicKey);
+      const reqType = offer.requestType || 'CAT';
+      const reqValue = offer.requestValue || categoryToRequest;
+      result = await BluetoothService.connectAndRequest(targetId, reqType, reqValue, profile.handle, profile.publicKey);
       if (result.success) success = true;
       else {
         console.log(">> CLIENT: Busy/Failed. Waiting 1s...");
@@ -2169,7 +2185,13 @@ export default function App() {
 
     if (success && result.data) {
       const peerName = activePeer?.name || "Unknown Source";
-      await processAndSaveIncomingCard(result.data.card, peerName, result.data.timestamp);
+      const isValid = await processAndSaveIncomingCard(result.data.card, peerName, result.data.timestamp);
+      
+      if (isValid && result.sendAck) {
+        await result.sendAck();
+      } else if (!isValid && result.cancelTransfer) {
+        await result.cancelTransfer();
+      }
     } else {
       if (result && result.isRedundant) {
         Alert.alert("Redundant Intel", "Redundant card. Everything is updated.");
@@ -2429,6 +2451,19 @@ export default function App() {
     
     // 1. AIRGAP PAYLOAD (Object directly from AirGapScanner)
     if (typeof scannedData === 'object' && scannedData !== null) {
+      if (scannedData.isBlePointer) {
+        setIsScannerVisible(false);
+        setTimeout(() => {
+          handleGrabCard({
+            id: scannedData.handle,
+            title: "Secured Payload",
+            requestType: 'ID',
+            requestValue: scannedData.cardId
+          }, 'standard');
+        }, 300);
+        return;
+      }
+      
       if (scannedData.id && scannedData.title && scannedData.body) {
         Alert.alert(
           "Card Shared via QR", 
@@ -3616,7 +3651,15 @@ export default function App() {
         }}
         onBlockOperator={handleBlockOperator}
         onOffer={handleOfferCard}
-        onAirGapTransfer={(card) => setAirGapPayload(card)}
+        onAirGapTransfer={(card) => {
+          setAirGapPayload({
+            handle: profile?.handle || 'Unknown',
+            cardId: card.id
+          });
+          // Also set the advertised card and start BLE broadcasting in the background 
+          // so the scanner can find it!
+          handleOfferCard(card);
+        }}
         onAddToGroceryList={handleAddToGroceryList}
       />
       <TransferRequestModal
