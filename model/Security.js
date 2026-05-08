@@ -174,23 +174,15 @@ export const verifyChain = (card, allowSystemBypass = false) => {
   let previousSignature = card.genesis.signature;
 
   for (const entry of (card.history || [])) {
-    // Skip non-transfer events like "FORK" or "CREATE" which don't use this chaining logic
-    if (entry.action !== 'SHARED' && entry.action !== 'TRANSFERRED') {
-        continue; 
+    // Determine the expected message to verify based on the action
+    let messageToVerify;
+    if (entry.action === 'FORK' || entry.action === 'CREATED') {
+        // Forks and Creations just sign their own key chained to the previous signature
+        messageToVerify = previousSignature + senderKey;
+    } else {
+        // Transfers sign the receiver's key chained to the previous signature
+        messageToVerify = previousSignature + receiverKey;
     }
-
-    // Recreate the message that the sender signed: (Previous Sig + Receiver's Key)
-    const receiverKey = entry.to || entry.receiver_id || entry.userKey;
-    const senderKey = entry.from || entry.sender_id || entry.fromKey;
-    
-      // SAFETY NET: Catch malformed hops before they hit the decoder
-      if (!previousSignature || !entry.signature || !senderKey) {
-          console.warn(">> SECURITY: Bypassing legacy unsigned hop.");
-          previousSignature = entry.signature || previousSignature; 
-          continue; 
-      }
-
-    const messageToVerify = previousSignature + receiverKey;
 
     const isHopValid = verifySignature(
       messageToVerify,

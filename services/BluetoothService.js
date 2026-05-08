@@ -457,6 +457,12 @@ const truncateToSafeBytes = (str, maxBytes) => {
             }
 
             console.log(`>> MESH SYNC: Connecting to ${targetDeviceId} (${targetHandleOrId})...`);
+            
+            // >>> PHASE 1: THE SUBMARINE DIVE <<<
+            this.pauseAutomatedHunt();
+            await this.stopBroadcasting(true);
+            this.stopScanning();
+
             this.updateState('CONNECTING');
             this.incomingBuffer = "";
 
@@ -489,15 +495,18 @@ const truncateToSafeBytes = (str, maxBytes) => {
                 }, 60000);
 
                 try {
-                    try { await this.manager.stopDeviceScan(); } catch (e) {}
+                    // Submarine dive already executed above, ensuring clean slate.
                     
-                    device = await this.manager.connectToDevice(targetDeviceId, { timeout: 15000 });
-                    await new Promise(r => setTimeout(r, 1000));
+                    // >>> PHASE 2: HARDWARE SANITIZATION (refreshGatt) <<<
+                    device = await this.manager.connectToDevice(targetDeviceId, { timeout: 15000, refreshGatt: 'OnConnected' });
+                    
+                    // >>> PHASE 2: NATIVE CHRONOLOGICAL SEQUENCE <<<
+                    try { await device.requestConnectionPriority(1); } catch (e) {}
+                    await new Promise(r => setTimeout(r, 500));
                     
                     try { await device.requestMTU(512); } catch (e) {}
                     await new Promise(r => setTimeout(r, 500));
-                    await new Promise(r => setTimeout(r, 1000));
-                    await new Promise(r => setTimeout(r, 500));
+                    
                     if (!(await device.isConnected())) throw new Error("Device disconnected before discovery.");
                     await device.discoverAllServicesAndCharacteristics();
 
@@ -515,7 +524,8 @@ const truncateToSafeBytes = (str, maxBytes) => {
                     if (!targetService) {
                         clearTimeout(connectionTimeout);
                         await cleanup();
-                        resolve({ success: false, error: 'Target Invalid' });
+                        const foundServices = services.map(s => s.uuid).join(', ');
+                        resolve({ success: false, error: `Target Invalid. Found: ${foundServices}` });
                         return;
                     }
 
@@ -672,6 +682,12 @@ const truncateToSafeBytes = (str, maxBytes) => {
             }
 
             console.log(`>> CLIENT: Connecting to ${targetDeviceId} (${targetHandleOrId})...`);
+            
+            // >>> PHASE 1: THE SUBMARINE DIVE <<<
+            this.pauseAutomatedHunt();
+            await this.stopBroadcasting(true);
+            this.stopScanning();
+
             this.updateState('CONNECTING');
             this.incomingBuffer = ""; 
 
@@ -719,12 +735,13 @@ const truncateToSafeBytes = (str, maxBytes) => {
                 }, 45000); 
 
                 try {
-                    try { await this.manager.stopDeviceScan(); } catch (e) {}
+                    // Submarine dive already executed above, ensuring clean slate.
                     
                     await new Promise(r => setTimeout(r, 1000));
 
                     console.log(">> CLIENT: Connecting...");
-                    device = await this.manager.connectToDevice(targetDeviceId, { timeout: 15000, autoConnect: false });
+                    // >>> PHASE 2: HARDWARE SANITIZATION (refreshGatt) <<<
+                    device = await this.manager.connectToDevice(targetDeviceId, { timeout: 15000, autoConnect: false, refreshGatt: 'OnConnected' });
                     console.log(`>> CLIENT: Connected to ${device.id}.`);
 
                     disconnectionSubscription = device.onDisconnected((error, d) => {
@@ -734,10 +751,15 @@ const truncateToSafeBytes = (str, maxBytes) => {
                         resolve({ success: false, error: 'DeviceDisconnected' });
                     });
 
-                    // 1. Give the Server phone 1 full second to spin up its GATT module
+                    // >>> PHASE 2: NATIVE CHRONOLOGICAL SEQUENCE <<<
+                    // 1. Force High Priority Connection (CONNECTION_PRIORITY_HIGH = 1)
+                    console.log(">> CLIENT: Requesting High Connection Priority...");
+                    try { await device.requestConnectionPriority(1); } catch (e) {}
+
+                    // 2. Give the Server phone 1 full second to spin up its GATT module
                     await new Promise(r => setTimeout(r, 1000));
                     
-                    // 2. Request the MTU pipe size BEFORE discovering services
+                    // 3. Request the MTU pipe size BEFORE discovering services
                     console.log(">> CLIENT: Requesting MTU...");
                     try {
                         await device.requestMTU(512);
@@ -745,13 +767,11 @@ const truncateToSafeBytes = (str, maxBytes) => {
                         console.log(">> CLIENT: MTU Request failed/ignored (iOS or unsupported). Proceeding.");
                     }
 
-                    // 3. Let the radio hardware settle after resizing
+                    // 4. Let the radio hardware settle after resizing
                     await new Promise(r => setTimeout(r, 500));
                     
-                    // 4. Map the services now that the pipe is stable
+                    // 5. Map the services now that the pipe is stable
                     console.log(">> CLIENT: Discovering services...");
-                    await new Promise(r => setTimeout(r, 1000));
-                    await new Promise(r => setTimeout(r, 500));
                     if (!(await device.isConnected())) throw new Error("Device disconnected before discovery.");
                     await device.discoverAllServicesAndCharacteristics();
 
@@ -764,7 +784,8 @@ const truncateToSafeBytes = (str, maxBytes) => {
                     if (!targetService) {
                         clearTimeout(connectionTimeout);
                         await cleanup();
-                        resolve({ success: false, error: 'Target Invalid' });
+                        const foundServices = services.map(s => s.uuid).join(', ');
+                        resolve({ success: false, error: `Target Invalid. Found: ${foundServices}` });
                         return;
                     }
 

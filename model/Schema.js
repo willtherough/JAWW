@@ -212,11 +212,14 @@ export const forkCard = async (originalCard, contextNote, userProfile, extraCita
   newCard.fork_depth = (newCard.fork_depth || 0) + 1;
 
   // 7. Impact Chain: Automatically cite the original card if not present, plus any extras
-  newCard.citations = newCard.citations || [];
+  if (!Array.isArray(newCard.citations)) {
+      newCard.citations = [];
+  }
+  
   if (!newCard.citations.includes(originalCard.id)) {
       newCard.citations.push(originalCard.id);
   }
-  if (extraCitations && extraCitations.length > 0) {
+  if (extraCitations && Array.isArray(extraCitations) && extraCitations.length > 0) {
       extraCitations.forEach(c => {
           if (!newCard.citations.includes(c)) newCard.citations.push(c);
       });

@@ -749,6 +749,19 @@ export default function App() {
         } catch (err) {
           console.error(">> UI: Failed to sync shadow hops:", err);
         }
+      } else if (
+        appStateRef.current === 'active' &&
+        nextAppState.match(/inactive|background/)
+      ) {
+        console.log(">> UI: Background detected. Forcing BLE Advertiser Teardown to prevent Android Ghosting...");
+        // Always attempt a silent stop to kill the native radio when the user leaves the app
+        BluetoothService.stopBroadcasting(true).catch(e => console.log(">> UI: Background teardown skip", e));
+        
+        // Ensure UI state reflects that they are no longer broadcasting if they return
+        setSourceState(prev => {
+          if (prev === 'BROADCASTING') return 'IDLE';
+          return prev;
+        });
       }
       appStateRef.current = nextAppState;
     });
@@ -1892,7 +1905,7 @@ export default function App() {
       if (viewMode === 'broadcast') setViewMode('wheel');
     } else {
       try {
-        await BluetoothService.startAdvertising(); // Uses default categories
+        await BluetoothService.startAdvertising(subjectToBroadcast); // <--- FIX: Actually pass the subject!
         setSourceState('BROADCASTING');
         Vibration.vibrate(100);
 
@@ -2197,6 +2210,8 @@ export default function App() {
         Alert.alert("Redundant Intel", "Redundant card. Everything is updated.");
       } else if (result && result.error === 'NO_CARDS') {
         Alert.alert("No Intel Found", `The target has no cards in the "${categoryToRequest}" category.`);
+      } else if (result && result.error === 'Target Invalid') {
+        Alert.alert("Ghost Signal Detected", "Target is invalid. This is usually a cached ghost signal. Please toggle Bluetooth OFF/ON to clear the hardware cache.");
       } else {
         Alert.alert("Connection Failed", result.error || "Target did not respond after 3 attempts.");
       }
@@ -2273,9 +2288,6 @@ export default function App() {
         let baseTitle = originalCard.title.replace('QUESTION: ', '').trim();
         newCard.title = `RE: ${baseTitle}`;
       }
-
-      // Strictly obey the 20-byte limit for the radio broadcast ("RE: " = 4 chars, leaving 16)
-      newCard.subject = `RE: ${originalCard.title.substring(0, 16)}`;
 
       await insertOrReplaceCard(newCard);
 
@@ -2577,6 +2589,8 @@ export default function App() {
           Alert.alert("Redundant Intel", "Redundant card. Everything is updated.");
         } else if (result && result.error === 'NO_CARDS') {
           Alert.alert("No Intel Found", `The target has no cards in the category.`);
+        } else if (result && result.error === 'Target Invalid') {
+          Alert.alert("Ghost Signal Detected", "Target is invalid. This is usually a cached ghost signal. Please toggle Bluetooth OFF/ON to clear the hardware cache.");
         } else {
           Alert.alert("Connection Failed", result?.error || "Target did not respond.");
         }
@@ -2610,6 +2624,8 @@ export default function App() {
           Alert.alert("Redundant Intel", "Redundant card. Everything is updated.");
         } else if (result && result.error === 'NO_CARDS') {
           Alert.alert("No Intel Found", `The target has no cards in the category.`);
+        } else if (result && result.error === 'Target Invalid') {
+          Alert.alert("Ghost Signal Detected", "Target is invalid. This is usually a cached ghost signal. Please toggle Bluetooth OFF/ON to clear the hardware cache.");
         } else {
           Alert.alert("Connection Failed", result?.error || "Target did not respond.");
         }

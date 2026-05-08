@@ -1,4 +1,4 @@
-import { NativeModules, DeviceEventEmitter, AppState } from 'react-native';
+import { NativeModules, DeviceEventEmitter, AppState, Alert } from 'react-native';
 import { Buffer } from 'buffer';
 import { searchCards, fetchCards, getCardById, fetchTrustedSources, isBlocked } from '../model/database';
 import { verifySignature, getOrGenerateKeys, signData } from '../model/Security';
@@ -537,6 +537,7 @@ const startServer = async () => {
             console.log(">> ENGINE 4: Listening...");
         } catch (e) {
             console.error(">> ENGINE 4: FAILED to start GATT server", e);
+            Alert.alert("GATT Server Failure", `Android failed to start the BLE Server. Code: ${e.message}`);
         }
     }
 };
