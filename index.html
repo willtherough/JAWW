@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>JAWW | The Sovereign Node</title>
+    <style>
+        :root {
+            --bg-color: #050505;
+            --text-color: #e0e0e0;
+            --accent: #444;
+        }
+        
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: flex-start;
+            min-height: 100vh;
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 800px;
+            padding: 2rem 10vw;
+        }
+
+        h1 {
+            font-size: clamp(2.5rem, 6vw, 4.5rem);
+            font-weight: 700;
+            letter-spacing: -0.03em;
+            margin-bottom: 2.5rem;
+            line-height: 1.1;
+        }
+
+        .dim {
+            color: #666;
+        }
+
+        .highlight {
+            color: #ffffff;
+        }
+
+        p {
+            font-size: clamp(1.1rem, 2vw, 1.4rem);
+            max-width: 650px;
+            margin-bottom: 2rem;
+            color: #b0b0b0;
+        }
+
+        .terminal-block {
+            font-family: "Courier New", Courier, monospace;
+            background-color: #0f0f0f;
+            padding: 1.5rem;
+            border-left: 3px solid var(--accent);
+            font-size: 1rem;
+            color: #888;
+            margin: 3rem 0;
+        }
+
+        .terminal-block span {
+            color: #ddd;
+        }
+
+        a {
+            color: #fff;
+            text-decoration: none;
+            border-bottom: 1px solid #fff;
+            padding-bottom: 2px;
+            transition: all 0.2s ease;
+        }
+
+        a:hover {
+            color: #888;
+            border-bottom-color: transparent;
+        }
+
+        footer {
+            margin-top: 5rem;
+            font-size: 0.9rem;
+            color: #555;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <h1>
+            <span class="dim">The internet is built for content.</span><br>
+            <span class="highlight">JAWW is built for context.</span>
+        </h1>
+        
+        <p>The web prioritizes what is being said, stripping away the physical reality of where, when, and who is saying it. It extracts our data into centralized server farms and feeds it back to us through algorithms.</p>
+        
+        <p>JAWW reverses this. We don't need the internet for everything. We need our devices to use their resources to make our lives better now without selling our data to advertisers.</p>
+	<em>We need a new era of tech that does the heavy lifting on our devices and never shares our data with anyone...</em>
+        
+        <div class="terminal-block">
+            > PROTOCOL: <span>Sovereign, offline-first mesh.</span><br>
+            > INFRASTRUCTURE: <span>Bluetooth Low Energy (BLE).</span><br>
+            > VERIFICATION: <span>Cryptographic DAG Ledger.</span><br>
+            > DEPENDENCIES: <span>Zero subsea cables. Zero cloud servers.</span>
+        </div>
+
+        <p>By empowering the hardware already in our pockets to communicate directly, JAWW forces digital connection back into the physical room. Data only syncs when trusted nodes occupy the same space. It gives communities the sovereign power to define the future of mobile technology without having to surrender our rights by accepting terms and conditions.</p>
+
+        <footer>
+            Currently in closed prototype.<br><br>
+            <a href="mailto:will@jaww.io">Request Architecture Review & White Paper</a>
+        </footer>
+    </div>
+
+</body>
+</html>
