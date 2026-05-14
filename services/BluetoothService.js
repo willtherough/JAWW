@@ -45,6 +45,16 @@ const truncateToSafeBytes = (str, maxBytes) => {
             this.isRadarActive = false;
             this.automatedSyncInterval = null;
             this.huntCooldowns = new Map();
+            
+            // --- CONCERT MODE STATE ---
+            this.concertModeEnabled = false;
+            this.trustedSources = [];
+        }
+
+        setConcertMode(enabled, sources = []) {
+            this.concertModeEnabled = enabled;
+            this.trustedSources = sources;
+            console.log(`>> CONCERT MODE: ${enabled ? 'ACTIVE' : 'OFFLINE'} with ${sources.length} trusted sources.`);
         }
 
         // --- 2. RADAR YIELD CONTROLS (Added as class methods) ---
@@ -98,9 +108,10 @@ const truncateToSafeBytes = (str, maxBytes) => {
         startAutomatedGenesisHunt(myHandle) {
             if (this.automatedSyncInterval) clearInterval(this.automatedSyncInterval);
 
-            console.log(">> GENESIS HUNT: Engine Started. Duty Cycle: 10s ON / 45s OFF.");
-
-            this.automatedSyncInterval = setInterval(async () => {
+            console.log(">> GENESIS HUNT: Automated Hunt Disabled (Manual Mode).");
+            
+            // --- THE FIX: Disable Automated Hunt Interval ---
+            /* this.automatedSyncInterval = setInterval(async () => {
                 if (this.isRadarActive) {
                     console.log(">> GENESIS HUNT: Skipped cycle (Radar Yield is active).");
                     return;
@@ -113,14 +124,23 @@ const truncateToSafeBytes = (str, maxBytes) => {
 
                 let pingString = `REQ:SYNC_PING:${targetCard.id}:${myHandle}:ALL`;
                 
-                // Active News Relay Check
-                try {
-                    const freqs = await loadNewsFrequencies();
-                    if (freqs && freqs.length > 0) {
-                        pingString = `REQ:NEWS_PULL:${freqs.join(',')}|${pingString}`;
-                        console.log(`>> GENESIS HUNT: Appending active News Frequencies (${freqs.length}) to payload.`);
-                    }
-                } catch(e) {}
+                // Concert Mode: Author Pull Override
+                if (this.concertModeEnabled && this.trustedSources.length > 0) {
+                    // Pick a random trusted source to hunt for this cycle to fit in BLE limits
+                    const randomSource = this.trustedSources[Math.floor(Math.random() * this.trustedSources.length)];
+                    const shortKey = randomSource.uid.substring(0, 8);
+                    pingString = `REQ:AUTHOR_PULL:${shortKey}`;
+                    console.log(`>> CONCERT MODE: Broadcasting Pull Request for Author: ${shortKey}`);
+                } else {
+                    // Active News Relay Check (Only if not in Concert Mode)
+                    try {
+                        const freqs = await loadNewsFrequencies();
+                        if (freqs && freqs.length > 0) {
+                            pingString = `REQ:NEWS_PULL:${freqs.join(',')}|${pingString}`;
+                            console.log(`>> GENESIS HUNT: Appending active News Frequencies (${freqs.length}) to payload.`);
+                        }
+                    } catch(e) {}
+                }
 
                 await setAdvertisedCard({ id: targetCard.id, pingPayload: pingString }); 
 
@@ -128,9 +148,9 @@ const truncateToSafeBytes = (str, maxBytes) => {
                     if (this.isRadarActive) return; 
                     console.log(">> GENESIS HUNT: 10s window closed. Going dark for 45s...");
                     await clearAdvertisedCard(); 
-                }, 10000); 
+                }, 10000); // 10 second active window
 
-            }, 55000); 
+            }, 45000); // 45 second sleep window */
         }
 
         stopAutomatedGenesisHunt() {
@@ -138,6 +158,51 @@ const truncateToSafeBytes = (str, maxBytes) => {
                 clearInterval(this.automatedSyncInterval);
                 this.automatedSyncInterval = null;
                 console.log(">> GENESIS HUNT: Engine completely shut down.");
+            }
+        }
+
+        async triggerManualSync(myHandle, syncType) {
+            console.log(`>> MANUAL SYNC: Initiating ${syncType} pull...`);
+            
+            // Submarine dive
+            this.pauseAutomatedHunt();
+            this.stopScanning();
+
+            try {
+                let pingString = '';
+                
+                if (syncType === 'grocery') {
+                    // Specific ping string for Grocery
+                    pingString = `REQ:GROCERY_PULL:${myHandle}`;
+                } else if (syncType === 'news') {
+                    // Specific ping string for News
+                    const freqs = await loadNewsFrequencies().catch(() => []);
+                    pingString = `REQ:NEWS_PULL:${freqs.join(',')}|REQ:SYNC_PING:NEWS:${myHandle}:ALL`;
+                } else {
+                    // Standard Mesh Sync
+                    const targetCard = await this.getHighestPriorityCard();
+                    if (targetCard) {
+                        pingString = `REQ:SYNC_PING:${targetCard.id}:${myHandle}:ALL`;
+                    } else {
+                        pingString = `REQ:SYNC_PING:GENESIS:${myHandle}:ALL`;
+                    }
+                }
+
+                await setAdvertisedCard({ id: 'manual-sync', pingPayload: pingString });
+                
+                // Blast the radio for 10 seconds, then shut off
+                if (this.isBroadcasting) await this.stopBroadcasting(true);
+                await this.startAdvertising();
+                
+                await new Promise(r => setTimeout(r, 10000));
+                
+                await clearAdvertisedCard();
+                console.log(`>> MANUAL SYNC: Completed ${syncType} pull.`);
+                
+            } catch (e) {
+                console.error(">> MANUAL SYNC FAILED:", e);
+            } finally {
+                this.resumeAutomatedHunt();
             }
         }
 
@@ -448,12 +513,65 @@ const truncateToSafeBytes = (str, maxBytes) => {
             });
         }
 
+        // --- 3. SQUAD RADAR (Targeted Scan) ---
+        deploySquadRadar(trustedSources) {
+            return new Promise((resolve, reject) => {
+                if (this.isBroadcasting) {
+                    this.stopAdvertising();
+                }
+                this.pauseAutomatedHunt();
+                
+                console.log(">> SQUAD RADAR: Scanning for Trusted Operators...");
+                let connectedCount = 0;
+                const maxConnections = 7;
+                const connectedMacs = new Set();
+
+                this.manager.startDeviceScan([TRANSFER_SERVICE_UUID], { allowDuplicates: false }, async (error, device) => {
+                    if (error) {
+                        console.error("Squad Radar Scan Error:", error);
+                        return;
+                    }
+
+                    if (device && device.name) {
+                        if (device.name.startsWith("JAWW_") && !connectedMacs.has(device.id)) {
+                            connectedMacs.add(device.id);
+                            connectedCount++;
+                            console.log(`>> SQUAD RADAR: Locked onto ${device.name}. Initiating fast-connect.`);
+                            
+                            // We don't await here because we want parallel connections to the squad
+                            this.connectAndRequest(device.id, null, device.name)
+                                .then(() => this.syncMarketPricesWithPeer(device.id))
+                                .catch(e => console.log("Squad connection failed:", e.message));
+
+                            if (connectedCount >= maxConnections) {
+                                console.log(">> SQUAD RADAR: Maximum hardware capacity reached (7). Halting scan.");
+                                this.manager.stopDeviceScan();
+                                resolve();
+                            }
+                        }
+                    }
+                });
+
+                // Stop radar after 15 seconds
+                setTimeout(() => {
+                    this.manager.stopDeviceScan();
+                    this.resumeAutomatedHunt();
+                    resolve();
+                }, 15000);
+            });
+        }
+
         async initiateMeshSync(targetHandleOrId, card) {
             const targetDeviceId = await this.getDeviceId(targetHandleOrId);
 
             if (!targetDeviceId) {
                 console.log(`>> MESH SYNC: Could not resolve handle "${targetHandleOrId}". Peer may be offline.`);
                 return { success: false, error: 'Peer_Offline' };
+            }
+
+            const isTrusted = this.trustedSources && this.trustedSources.some(s => s.uid === targetDeviceId);
+            if (isTrusted) {
+                console.log(`>> SQUAD FAST-TRACK: Bypassing ECDH negotiation for Trusted Source: ${targetDeviceId}`);
             }
 
             console.log(`>> MESH SYNC: Connecting to ${targetDeviceId} (${targetHandleOrId})...`);
@@ -502,10 +620,10 @@ const truncateToSafeBytes = (str, maxBytes) => {
                     
                     // >>> PHASE 2: NATIVE CHRONOLOGICAL SEQUENCE <<<
                     try { await device.requestConnectionPriority(1); } catch (e) {}
-                    await new Promise(r => setTimeout(r, 500));
+                    await new Promise(r => setTimeout(r, isTrusted ? 100 : 500));
                     
                     try { await device.requestMTU(512); } catch (e) {}
-                    await new Promise(r => setTimeout(r, 500));
+                    await new Promise(r => setTimeout(r, isTrusted ? 100 : 500));
                     
                     if (!(await device.isConnected())) throw new Error("Device disconnected before discovery.");
                     await device.discoverAllServicesAndCharacteristics();
@@ -529,7 +647,9 @@ const truncateToSafeBytes = (str, maxBytes) => {
                         return;
                     }
 
-                    await new Promise(resolve => setTimeout(resolve, 500)); 
+                    await new Promise(resolve => setTimeout(resolve, isTrusted ? 100 : 500)); 
+
+
 
                     // --- 2. THE LISTENER (KEEP THIS!) ---
                     // This waits for the "ACK" (Return Ping) from the other phone
@@ -576,7 +696,7 @@ const truncateToSafeBytes = (str, maxBytes) => {
                         }
                     );
                     
-                    await new Promise(resolve => setTimeout(resolve, 1500)); 
+                    await new Promise(resolve => setTimeout(resolve, isTrusted ? 100 : 1500)); 
                     
                     // 1. Generate a random 16-byte nonce
                     const challengeNonce = Math.random().toString(36).substring(2, 18);
@@ -628,50 +748,59 @@ const truncateToSafeBytes = (str, maxBytes) => {
             const pingPayload = `REQ:SYNC_PING:${cardId}:${senderHandle}:${targetsString}`;
             const chunk = Buffer.from(pingPayload, 'utf8').toString('base64');
             
-            for (const targetHandle of targetsArray) {
-                try {
-                    const targetDeviceId = await this.getDeviceId(targetHandle);
-                    if (!targetDeviceId) {
-                        console.log(`>> MESH: Could not resolve MAC for ${targetHandle}`);
-                        continue;
-                    }
-                    
-                    console.log(`>> MESH: Connecting to ${targetHandle} (${targetDeviceId})...`);
-                    const device = await this.manager.connectToDevice(targetDeviceId, { timeout: 5000 }); // Bumped timeout slightly for safety
-                    
-                    // --- THE 20-BYTE LIMIT FIX ---
-                    try {
-                        // Force the Android BLE stack to open the pipe to 512 bytes
-                        await device.requestMTU(512);
-                        console.log(`>> MESH: MTU pipe expanded to 512 bytes.`);
-                    } catch (mtuErr) {
-                        // iOS auto-negotiates, so we catch this silently if it fails
-                        console.log(`>> MESH: MTU negotiation skipped or handled by OS.`);
-                    }
-                    // -----------------------------
+            // THE SUBMARINE DIVE: Stop the radar to prevent "Operation was cancelled" conflicts
+            this.pauseAutomatedHunt();
+            this.stopScanning();
 
-                    await new Promise(r => setTimeout(r, 500));
-                    if (!(await device.isConnected())) throw new Error("Device disconnected before discovery.");
-                    await device.discoverAllServicesAndCharacteristics();
-                    
-                    const cleanServiceUUID = TRANSFER_SERVICE_UUID.toLowerCase();
-                    const cleanCharUUID = TRANSFER_CHAR_UUID.toLowerCase();
-                    
-                    await device.writeCharacteristicWithoutResponseForService(
-                        cleanServiceUUID,
-                        cleanCharUUID,
-                        chunk
-                    );
-                    
-                    console.log(`>> MESH: Full Sync ping delivered to ${targetHandle}.`);
-                    await device.cancelConnection().catch(() => {});
-                } catch (e) {
-                    console.error(`>> MESH: Auto-Sync Ping Failed for ${targetHandle}`, e.message);
+            try {
+                for (const targetHandle of targetsArray) {
+                    try {
+                        const targetDeviceId = await this.getDeviceId(targetHandle);
+                        if (!targetDeviceId) {
+                            console.log(`>> MESH: Could not resolve MAC for ${targetHandle}`);
+                            continue;
+                        }
+                        
+                        console.log(`>> MESH: Connecting to ${targetHandle} (${targetDeviceId})...`);
+                        const device = await this.manager.connectToDevice(targetDeviceId, { timeout: 5000 }); // Bumped timeout slightly for safety
+                        
+                        // --- THE 20-BYTE LIMIT FIX ---
+                        try {
+                            // Force the Android BLE stack to open the pipe to 512 bytes
+                            await device.requestMTU(512);
+                            console.log(`>> MESH: MTU pipe expanded to 512 bytes.`);
+                        } catch (mtuErr) {
+                            // iOS auto-negotiates, so we catch this silently if it fails
+                            console.log(`>> MESH: MTU negotiation skipped or handled by OS.`);
+                        }
+                        // -----------------------------
+
+                        await new Promise(r => setTimeout(r, 500));
+                        if (!(await device.isConnected())) throw new Error("Device disconnected before discovery.");
+                        await device.discoverAllServicesAndCharacteristics();
+                        
+                        const cleanServiceUUID = TRANSFER_SERVICE_UUID.toLowerCase();
+                        const cleanCharUUID = TRANSFER_CHAR_UUID.toLowerCase();
+                        
+                        await device.writeCharacteristicWithoutResponseForService(
+                            cleanServiceUUID,
+                            cleanCharUUID,
+                            chunk
+                        );
+                        
+                        console.log(`>> MESH: Full Sync ping delivered to ${targetHandle}.`);
+                        await device.cancelConnection().catch(() => {});
+                    } catch (e) {
+                        console.error(`>> MESH: Auto-Sync Ping Failed for ${targetHandle}`, e.message);
+                    }
                 }
+            } finally {
+                // Resume the automated hunt after pings are sent
+                this.resumeAutomatedHunt();
             }
         }
 
-        async connectAndRequest(targetHandleOrId, requestType, requestValue, myHandle, myPublicKey) {
+        async connectAndRequest(targetHandleOrId, requestType, requestValue, myHandle, myPublicKey, customTimeoutMs = 45000) {
             this.pauseAutomatedHunt();
             await this.stopBroadcasting(true);
             const targetDeviceId = await this.getDeviceId(targetHandleOrId);
@@ -680,6 +809,8 @@ const truncateToSafeBytes = (str, maxBytes) => {
                 console.log(`>> CLIENT: Could not resolve handle "${targetHandleOrId}". Peer may be offline.`);
                 return { success: false, error: 'Peer_Offline' };
             }
+
+            const isTrusted = this.trustedSources && this.trustedSources.some(s => s.uid === targetDeviceId);
 
             console.log(`>> CLIENT: Connecting to ${targetDeviceId} (${targetHandleOrId})...`);
             
@@ -732,16 +863,16 @@ const truncateToSafeBytes = (str, maxBytes) => {
                     console.log(">> CLIENT: Human/Network Timeout.");
                     cleanup();
                     resolve({ success: false, error: 'Timeout' });
-                }, 45000); 
+                }, customTimeoutMs); 
 
                 try {
                     // Submarine dive already executed above, ensuring clean slate.
                     
-                    await new Promise(r => setTimeout(r, 1000));
+                    await new Promise(r => setTimeout(r, isTrusted ? 100 : 1000));
 
                     console.log(">> CLIENT: Connecting...");
                     // >>> PHASE 2: HARDWARE SANITIZATION (refreshGatt) <<<
-                    device = await this.manager.connectToDevice(targetDeviceId, { timeout: 15000, autoConnect: false, refreshGatt: 'OnConnected' });
+                    device = await this.manager.connectToDevice(targetDeviceId, { timeout: Math.min(15000, customTimeoutMs), autoConnect: false, refreshGatt: 'OnConnected' });
                     console.log(`>> CLIENT: Connected to ${device.id}.`);
 
                     disconnectionSubscription = device.onDisconnected((error, d) => {
@@ -757,7 +888,7 @@ const truncateToSafeBytes = (str, maxBytes) => {
                     try { await device.requestConnectionPriority(1); } catch (e) {}
 
                     // 2. Give the Server phone 1 full second to spin up its GATT module
-                    await new Promise(r => setTimeout(r, 1000));
+                    await new Promise(r => setTimeout(r, isTrusted ? 100 : 1000));
                     
                     // 3. Request the MTU pipe size BEFORE discovering services
                     console.log(">> CLIENT: Requesting MTU...");
@@ -768,7 +899,7 @@ const truncateToSafeBytes = (str, maxBytes) => {
                     }
 
                     // 4. Let the radio hardware settle after resizing
-                    await new Promise(r => setTimeout(r, 500));
+                    await new Promise(r => setTimeout(r, isTrusted ? 100 : 500));
                     
                     // 5. Map the services now that the pipe is stable
                     console.log(">> CLIENT: Discovering services...");
@@ -799,7 +930,7 @@ const truncateToSafeBytes = (str, maxBytes) => {
                         return;
                     }
 
-                    await new Promise(resolve => setTimeout(resolve, 500)); 
+                    await new Promise(resolve => setTimeout(resolve, isTrusted ? 100 : 500)); 
 
                     characteristicMonitor = device.monitorCharacteristicForService(
                         targetService.uuid,
@@ -1057,6 +1188,85 @@ const truncateToSafeBytes = (str, maxBytes) => {
                 return { success: false, error: e.message };
             }
         }
+
+        async syncMarketPricesWithPeer(targetDeviceId) {
+            console.log(`>> MESH: Requesting Price Sync from ${targetDeviceId}`);
+            try {
+                const device = await this.manager.connectToDevice(targetDeviceId, { timeout: 10000 });
+                await new Promise(r => setTimeout(r, 500));
+                if (!(await device.isConnected())) throw new Error("Device disconnected before discovery.");
+                await device.discoverAllServicesAndCharacteristics();
+                
+                const services = await device.services();
+                const cleanServiceUUID = TRANSFER_SERVICE_UUID.toLowerCase();
+                const service = services.find(s => s.uuid.toLowerCase().includes(cleanServiceUUID));
+                
+                if (!service) throw new Error("Service not found.");
+
+                const requestString = `REQ:PRICE_SYNC`;
+                const requestPayload = Buffer.from(requestString).toString('base64');
+                
+                // Set up listener for the ACK
+                const cleanCharUUID = TRANSFER_CHAR_UUID.toLowerCase();
+                let incomingBuffer = "";
+                
+                return new Promise((resolve) => {
+                    const timeout = setTimeout(async () => {
+                        await device.cancelConnection().catch(()=>{});
+                        resolve({ success: false, error: 'Timeout' });
+                    }, 10000);
+
+                    device.monitorCharacteristicForService(
+                        service.uuid,
+                        cleanCharUUID,
+                        async (error, char) => {
+                            if (error || !char?.value) return;
+                            const chunk = Buffer.from(char.value, 'base64').toString('utf8');
+                            incomingBuffer += chunk;
+                            
+                            if (incomingBuffer.includes('ACK:PRICE_SYNC:')) {
+                                clearTimeout(timeout);
+                                try {
+                                    const parts = incomingBuffer.split(':', 4);
+                                    const authorId = parts[2];
+                                    const signature = parts[3];
+                                    const jsonStartIndex = incomingBuffer.indexOf('[');
+                                    if (jsonStartIndex !== -1) {
+                                        const jsonPayload = incomingBuffer.substring(jsonStartIndex);
+                                        const pricesArray = JSON.parse(jsonPayload);
+                                        
+                                        // Verify Signature
+                                        const { verifySignature } = require('../model/Security');
+                                        const isValid = await verifySignature(jsonPayload, signature, authorId);
+                                        
+                                        if (isValid) {
+                                            const { syncMarketPrices } = require('../model/database');
+                                            await syncMarketPrices(pricesArray, authorId, signature);
+                                            console.log(">> MESH: Successfully securely synced market prices.");
+                                        } else {
+                                            console.error(">> MESH: Invalid signature on price sync.");
+                                        }
+                                    }
+                                } catch (e) {
+                                    console.error(">> MESH: Failed to parse price sync payload", e);
+                                }
+                                await device.cancelConnection().catch(()=>{});
+                                resolve({ success: true });
+                            }
+                        }
+                    );
+
+                    device.writeCharacteristicWithoutResponseForService(
+                        service.uuid, cleanCharUUID, requestPayload
+                    ).catch(()=>{});
+                });
+
+            } catch (e) {
+                console.error(">> MESH: Price Sync Failed", e);
+                return { success: false, error: e.message };
+            }
+        }
+
 
         // --- UMPIRE MODE: CHUNKED DATA PUSH ---
         // 👇 Notice the two new arguments added to the top here 👇

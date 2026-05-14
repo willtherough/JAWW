@@ -4,6 +4,7 @@ import {
 } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import { extractIngredientsFromRecipes } from '../utils/BiologyEngine';
+import { generateSupplyRequest } from '../utils/LogisticsOptimizer';
 
 export default function GroceryListModal({ visible, onClose, localLibrary = [] }) {
     
@@ -32,9 +33,18 @@ export default function GroceryListModal({ visible, onClose, localLibrary = [] }
 
     // 3. Local state for checkmarks
     const [checkedItems, setCheckedItems] = useState({});
+    const [isOptimizing, setIsOptimizing] = useState(false);
+    const [optimizedData, setOptimizedData] = useState(null);
 
     const toggleCheck = (index) => {
         setCheckedItems(prev => ({ ...prev, [index]: !prev[index] }));
+    };
+
+    const handleGenerateLogistics = async () => {
+        setIsOptimizing(true);
+        const result = await generateSupplyRequest();
+        setOptimizedData(result);
+        setIsOptimizing(false);
     };
 
     return (
@@ -48,17 +58,25 @@ export default function GroceryListModal({ visible, onClose, localLibrary = [] }
                 </View>
 
                 <View style={styles.actionHeader}>
-                    <Text style={styles.statText}>Extracting from {activeRecipes.length} scheduled meals</Text>
+                    <TouchableOpacity style={styles.logisticsButton} onPress={handleGenerateLogistics} disabled={isOptimizing}>
+                        <Feather name="zap" size={16} color="#050505" />
+                        <Text style={styles.logisticsButtonText}>
+                            {isOptimizing ? "OPTIMIZING LOGISTICS..." : "GENERATE SUPPLY REQUEST"}
+                        </Text>
+                    </TouchableOpacity>
+                    {optimizedData && (
+                        <Text style={styles.costEstimate}>Estimated Mesh Cost: ${optimizedData.estimatedCost}</Text>
+                    )}
                 </View>
 
-                {aggregatedIngredients.length === 0 ? (
+                {(!optimizedData && aggregatedIngredients.length === 0) ? (
                     <View style={styles.emptyState}>
                         <Feather name="shopping-cart" size={48} color="#333" />
-                        <Text style={styles.emptyPrompt}>No ingredients found. Generate a Weekly Plan first, or ensure your RECIPE cards have an "Ingredients:" section.</Text>
+                        <Text style={styles.emptyPrompt}>Tap 'Generate Supply Request' to build the cheapest grocery list that meets your macro requirements based on local Mesh data.</Text>
                     </View>
                 ) : (
                     <FlatList 
-                        data={aggregatedIngredients}
+                        data={optimizedData ? optimizedData.list : aggregatedIngredients}
                         keyExtractor={(item, index) => index.toString()}
                         contentContainerStyle={{ padding: 20, paddingBottom: 100 }}
                         renderItem={({ item, index }) => (
@@ -87,8 +105,10 @@ const styles = StyleSheet.create({
     container: { flex: 1, backgroundColor: '#050505', paddingTop: Platform.OS === 'android' ? StatusBar.currentHeight : 0 },
     header: { flexDirection: 'row', justifyContent: 'space-between', padding: 20, borderBottomWidth: 1, borderBottomColor: '#111', backgroundColor: '#0a0a0a' },
     headerTitle: { color: '#10B981', fontSize: 18, fontWeight: 'bold', fontFamily: 'Courier', letterSpacing: 1 },
-    actionHeader: { padding: 15, backgroundColor: '#111', borderBottomWidth: 1, borderColor: '#222' },
-    statText: { color: '#888', fontFamily: 'Courier', fontSize: 12 },
+    actionHeader: { padding: 15, backgroundColor: '#111', borderBottomWidth: 1, borderColor: '#222', alignItems: 'center' },
+    logisticsButton: { backgroundColor: '#10B981', flexDirection: 'row', alignItems: 'center', paddingVertical: 12, paddingHorizontal: 20, borderRadius: 8 },
+    logisticsButtonText: { color: '#050505', fontFamily: 'Courier', fontWeight: 'bold', marginLeft: 10, fontSize: 14 },
+    costEstimate: { color: '#E2E8F0', fontFamily: 'Courier', fontSize: 14, marginTop: 15, fontWeight: 'bold' },
     emptyState: { alignItems: 'center', justifyContent: 'center', padding: 40, marginTop: 40 },
     emptyPrompt: { color: '#666', fontFamily: 'Courier', textAlign: 'center', marginTop: 20, lineHeight: 22 },
     itemRow: { 

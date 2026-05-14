@@ -72,13 +72,36 @@ const onCardReceived = async (requestString) => {
     // ==========================================
     const isBackground = AppState.currentState.match(/inactive|background/);
     const isUmpireRequest = requestString.startsWith('REQ:UMPIRE'); 
-    const isSyncRequest = requestString.startsWith('REQ:SYNC_PING') || requestString.startsWith('REQ:NEWS_PULL') || requestString.startsWith('REQ:CHALLENGE') || requestString.startsWith('REQ:DELTA') || requestString.startsWith('ACK:SYNC_LEDGER');
+    const isSyncRequest = requestString.startsWith('REQ:SYNC_PING') || requestString.startsWith('REQ:NEWS_PULL') || requestString.startsWith('REQ:CHALLENGE') || requestString.startsWith('REQ:DELTA') || requestString.startsWith('ACK:SYNC_LEDGER') || requestString.startsWith('REQ:PRICE_SYNC');
 
     if (isBackground && !isUmpireRequest && !isSyncRequest && !requestString.startsWith('HANDSHAKE')) {
         console.log(">> PASSIVE FIREWALL: Blocked untrusted/general request while in background.", requestString);
         return;
     }
     // ==========================================
+
+    if (requestString.startsWith('REQ:PRICE_SYNC')) {
+        try {
+            const myProfile = await loadProfile();
+            if (!myProfile || !myProfile.publicKey) return;
+
+            const { getLocalPricesForBroadcast } = require('../model/database');
+            const localPrices = await getLocalPricesForBroadcast();
+            
+            if (!localPrices || localPrices.length === 0) return;
+
+            const payloadStr = JSON.stringify(localPrices);
+            const { privateKey } = await getOrGenerateKeys();
+            const signature = await signData(payloadStr, privateKey);
+
+            const responsePayload = `ACK:PRICE_SYNC:${myProfile.publicKey}:${signature}:${payloadStr}`;
+            await sendSyncPingBack(null, responsePayload);
+            console.log(`>> GATT SERVER: Sent Price Sync payload to initiator.`);
+        } catch (error) {
+            console.error(">> GATT SERVER: Price Sync Failed", error);
+        }
+        return;
+    }
 
     if (requestString.startsWith('REQ:NEWS_PULL:') || requestString.startsWith('REQ:SYNC_PING:')) {
         let actualPingString = requestString;

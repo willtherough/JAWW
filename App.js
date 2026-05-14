@@ -45,6 +45,7 @@ import AnimatedQRTransfer from './components/AnimatedQRTransfer';
 import AirGapScanner from './components/AirGapScanner';
 import RosettaVerificationModal from './components/RosettaVerificationModal';
 import UmpireDashboardService from './services/UmpireDashboardService';
+import SettingsModal from './components/SettingsModal';
 
 const decodeVaultBitmask = (bitmask) => {
   if (!bitmask) return null;
@@ -640,8 +641,7 @@ export default function App() {
   const [groceryList, setGroceryList] = useState([]);
   const [syncBadges, setSyncBadges] = useState({}); // Holds { cardId: numberOfNewEntries }
   const [isSynapseArenaVisible, setIsSynapseArenaVisible] = useState(false);
-
-  // NEW: Unified JitterSync Engine State
+  const [isSettingsModalVisible, setIsSettingsModalVisible] = useState(false);
   const [isJitterSyncActive, setIsJitterSyncActive] = useState(false);
   const jitterSyncLockRef = useRef(false);
   const jitterSyncDebounceRef = useRef(null);
@@ -1343,8 +1343,8 @@ export default function App() {
 
           console.log(`>> DB: Ledger sealed for ${recipientHandle}. Total Hops: ${calculatedHops}`);
           
-          // --- PHASE 1 PLUMBING: TRIGGER JITTER SYNC ---
-          triggerJitterSync(syncedCard);
+          // --- PHASE 1 PLUMBING: TRIGGER JITTER SYNC (Disabled for Manual Mode) ---
+          // triggerJitterSync(syncedCard);
         }
       }
 
@@ -1959,8 +1959,8 @@ export default function App() {
       // 4. Save the fully formed card to SQLite
       await insertOrReplaceCard(signedCard);
 
-      // --- PHASE 1 PLUMBING: TRIGGER JITTER SYNC ---
-      triggerJitterSync(signedCard);
+      // --- PHASE 1 PLUMBING: TRIGGER JITTER SYNC (Disabled for Manual Mode) ---
+      // triggerJitterSync(signedCard);
 
       // 5. THE FIX: Only queue for Umpire once we are 100% sure we have signedCard.id
       if (activeUmpireEvent && activeUmpireEvent.subject && signedCard.id) {
@@ -2188,7 +2188,8 @@ export default function App() {
       if (attempts > 1) console.log(`>> CLIENT: Connection Attempt ${attempts}/3...`);
       const reqType = offer.requestType || 'CAT';
       const reqValue = offer.requestValue || categoryToRequest;
-      result = await BluetoothService.connectAndRequest(targetId, reqType, reqValue, profile.handle, profile.publicKey);
+      const customTimeoutMs = offer.isBlePointer ? 10000 : 45000;
+      result = await BluetoothService.connectAndRequest(targetId, reqType, reqValue, profile.handle, profile.publicKey, customTimeoutMs);
       if (result.success) success = true;
       else {
         console.log(">> CLIENT: Busy/Failed. Waiting 1s...");
@@ -2291,8 +2292,8 @@ export default function App() {
 
       await insertOrReplaceCard(newCard);
 
-      // --- PHASE 1 PLUMBING: TRIGGER JITTER SYNC ---
-      triggerJitterSync(newCard);
+      // --- PHASE 1 PLUMBING: TRIGGER JITTER SYNC (Disabled for Manual Mode) ---
+      // triggerJitterSync(newCard);
 
       const freshCards = await getAllCards();
       setCards(freshCards);
@@ -2470,7 +2471,8 @@ export default function App() {
             id: scannedData.handle,
             title: "Secured Payload",
             requestType: 'ID',
-            requestValue: scannedData.cardId
+            requestValue: scannedData.cardId,
+            isBlePointer: true
           }, 'standard');
         }, 300);
         return;
@@ -3195,8 +3197,8 @@ export default function App() {
         <View style={{ flexDirection: 'row', gap: 10 }}>
 
           <TouchableOpacity onPress={() => setIsProfileVisible(true)} style={styles.btnSmallOutline}><Text style={styles.btnTextGray}>Profile</Text></TouchableOpacity>
-          <TouchableOpacity onPress={toggleBroadcast} style={[styles.broadcastBtnCompact, isBroadcasting && { backgroundColor: '#003300', borderColor: '#00ff00' }]}>
-            <Text style={styles.broadcastText}>{isBroadcasting ? 'ON AIR' : 'SYNC'}</Text>
+          <TouchableOpacity onPress={() => setIsSettingsModalVisible(true)} style={styles.btnSmallOutline}>
+            <Feather name="settings" size={16} color="#9ca3af" />
           </TouchableOpacity>
         </View>
       </View>
@@ -3522,11 +3524,17 @@ export default function App() {
         <TouchableOpacity onPress={() => setIsScannerVisible(true)} style={styles.footBtn}><Text style={styles.footText}>SCAN QR</Text></TouchableOpacity>
         <TouchableOpacity onPress={() => setIsCreateVisible(true)} style={styles.footBtnMain}><Text style={styles.footTextMain}>+ CREATE</Text></TouchableOpacity>
         <TouchableOpacity onPress={() => setViewMode(viewMode === 'radar' ? 'wheel' : 'radar')} style={styles.footBtn}><Text style={styles.footText}>RADAR</Text></TouchableOpacity>
-        <TouchableOpacity onPress={runGattStressTest} style={[styles.footBtn, {borderColor: '#f00'}]}><Text style={[styles.footText, {color: '#f00'}]}>STRESS</Text></TouchableOpacity>
       </View>
 
       <ContextModal visible={!!cardToFork} card={cardToFork} onClose={() => setCardToFork(null)} onSave={(n) => handleForkCard(cardToFork, n)} />
       <ChainModal visible={!!chainCard} card={chainCard} onClose={() => setChainCard(null)} currentUserHandle={profile.handle} />
+      <SettingsModal 
+        visible={isSettingsModalVisible} 
+        onClose={() => setIsSettingsModalVisible(false)} 
+        onSyncMesh={() => BluetoothService.triggerManualSync(profile.handle, 'all')}
+        onSyncGrocery={() => BluetoothService.triggerManualSync(profile.handle, 'grocery')}
+        onSyncNews={() => BluetoothService.triggerManualSync(profile.handle, 'news')}
+      />
       <HandshakeModal
         visible={!!activePeer && !isBrowseVisible}
         peer={activePeer}

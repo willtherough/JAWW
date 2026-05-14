@@ -77,62 +77,101 @@ export default function RosettaScannerModal({ visible, onClose, onScanComplete }
     }
 
     return (
-        <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
-            <View style={styles.overlay}>
-                <Text style={styles.headerTitle}>ROSETTA RECEIPT OCR</Text>
-                <Text style={styles.subTitle}>Align Receipt in Target Window...</Text>
+        <Modal visible={visible} transparent={false} animationType="slide" onRequestClose={onClose}>
+            <View style={styles.container}>
+                <CameraView 
+                    style={StyleSheet.absoluteFillObject} 
+                    ref={cameraRef}
+                    facing="back"
+                />
                 
-                <View style={styles.cameraContainer}>
-                    <CameraView 
-                        style={StyleSheet.absoluteFillObject} 
-                        ref={cameraRef}
-                        facing="back"
-                    />
-                    
-                    {/* OCR Targeting Reticle */}
-                    <View style={styles.targetOverlay}>
-                        <View style={styles.scanWindow} />
-                    </View>
+                {/* Header HUD */}
+                <View style={styles.headerHud}>
+                    <Text style={styles.headerTitle}>FRIDGE & PANTRY SCANNER</Text>
+                    <Text style={styles.subTitle}>Capture entire grocery receipt for OCR</Text>
                 </View>
 
-                {/* REAL OCR BUTTON */}
-                <TouchableOpacity onPress={handleCaptureReceipt} style={[styles.closeButton, { borderColor: '#10B981', marginTop: 20, backgroundColor: 'rgba(16, 185, 129, 0.1)' }]} disabled={isCapturing}>
-                    {isCapturing ? (
-                        <ActivityIndicator color="#10B981" />
-                    ) : (
-                        <Text style={[styles.closeButtonText, { color: '#10B981' }]}>[ CAPTURE RECEIPT ]</Text>
-                    )}
-                </TouchableOpacity>
+                {/* Footer Controls */}
+                <View style={styles.footerControls}>
+                    <TouchableOpacity onPress={onClose} style={styles.abortButton}>
+                        <Text style={styles.abortButtonText}>ABORT</Text>
+                    </TouchableOpacity>
 
-                <TouchableOpacity onPress={onClose} style={styles.closeButton}>
-                    <Text style={styles.closeButtonText}>ABORT SCAN</Text>
-                </TouchableOpacity>
+                    <TouchableOpacity onPress={handleCaptureReceipt} style={styles.shutterButton} disabled={isCapturing}>
+                        {isCapturing ? (
+                            <ActivityIndicator color="#050505" size="large" />
+                        ) : (
+                            <View style={styles.shutterInner} />
+                        )}
+                    </TouchableOpacity>
+                    
+                    <View style={{width: 60}} /> {/* Spacer to balance the abort button */}
+                </View>
+                
+                {isCapturing && (
+                    <View style={styles.processingOverlay}>
+                        <Text style={styles.processingText}>Extracting Line Items...</Text>
+                    </View>
+                )}
             </View>
         </Modal>
     );
 }
 
 const styles = StyleSheet.create({
-    overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.95)', justifyContent: 'center', alignItems: 'center' },
-    headerTitle: { color: '#10B981', fontFamily: 'Courier', fontSize: 20, fontWeight: 'bold', marginBottom: 10, letterSpacing: 2 },
-    subTitle: { color: '#94A3B8', fontFamily: 'Courier', fontSize: 12, marginBottom: 30 },
-    cameraContainer: {
-        width: '90%', 
-        height: 200, 
-        backgroundColor: '#000', 
-        borderRadius: 10, 
-        overflow: 'hidden', 
-        borderWidth: 2, 
-        borderColor: '#10B981',
+    container: { flex: 1, backgroundColor: '#000' },
+    overlay: { flex: 1, backgroundColor: '#000', justifyContent: 'center', alignItems: 'center' },
+    headerHud: {
+        position: 'absolute',
+        top: 60,
+        left: 0,
+        right: 0,
+        alignItems: 'center',
+        backgroundColor: 'rgba(0,0,0,0.5)',
+        paddingVertical: 15
     },
-    targetOverlay: { ...StyleSheet.absoluteFillObject, justifyContent: 'center', alignItems: 'center' },
-    scanWindow: { 
-        width: '90%', 
-        height: '60%', 
-        borderWidth: 1, 
-        borderColor: 'rgba(16, 185, 129, 0.4)', // Faded green
-        borderRadius: 5 
+    headerTitle: { color: '#F59E0B', fontFamily: 'Courier', fontSize: 18, fontWeight: 'bold', letterSpacing: 2 },
+    subTitle: { color: '#FFF', fontFamily: 'Courier', fontSize: 12, marginTop: 5 },
+    footerControls: {
+        position: 'absolute',
+        bottom: 40,
+        left: 0,
+        right: 0,
+        flexDirection: 'row',
+        justifyContent: 'space-around',
+        alignItems: 'center',
+        paddingHorizontal: 20
     },
-    closeButton: { marginTop: 40, paddingHorizontal: 30, paddingVertical: 12, borderWidth: 1, borderColor: '#64748B', borderRadius: 8 },
-    closeButtonText: { color: '#94A3B8', fontFamily: 'Courier', fontWeight: 'bold' }
+    shutterButton: {
+        width: 80,
+        height: 80,
+        borderRadius: 40,
+        backgroundColor: '#F59E0B',
+        justifyContent: 'center',
+        alignItems: 'center',
+        borderWidth: 4,
+        borderColor: '#FFF'
+    },
+    shutterInner: {
+        width: 66,
+        height: 66,
+        borderRadius: 33,
+        borderWidth: 2,
+        borderColor: '#000'
+    },
+    abortButton: { padding: 15 },
+    abortButtonText: { color: '#FFF', fontFamily: 'Courier', fontSize: 16, fontWeight: 'bold' },
+    processingOverlay: {
+        ...StyleSheet.absoluteFillObject,
+        backgroundColor: 'rgba(0,0,0,0.8)',
+        justifyContent: 'center',
+        alignItems: 'center'
+    },
+    processingText: {
+        color: '#F59E0B',
+        fontFamily: 'Courier',
+        fontSize: 18,
+        fontWeight: 'bold',
+        marginTop: 20
+    }
 });

@@ -1,5 +1,6 @@
 import * as SQLite from 'expo-sqlite';
 import { expandQuery } from './Brain';
+import { matchToNutritionalMatrix } from '../utils/NutritionalMatrix';
 
 /**
  * Calculates the 'Unique Downstream Reach' from a card's history array.
@@ -99,6 +100,8 @@ export const initDB = async () => {
       CREATE TABLE IF NOT EXISTS transfers ( id INTEGER PRIMARY KEY NOT NULL, cardId TEXT NOT NULL, recipientHandle TEXT NOT NULL, timestamp TEXT NOT NULL );
       CREATE TABLE IF NOT EXISTS local_blocklist (public_key TEXT PRIMARY KEY NOT NULL, blocked_at TEXT NOT NULL, reason TEXT);
       CREATE TABLE IF NOT EXISTS quarantined_hashes (hash TEXT PRIMARY KEY NOT NULL, quarantined_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS inventory ( id TEXT PRIMARY KEY NOT NULL, item_name TEXT NOT NULL, current_price REAL NOT NULL, previous_price REAL, quantity INTEGER DEFAULT 1, last_purchased_date TEXT NOT NULL, macros TEXT, shelf_life_days INTEGER );
+      CREATE TABLE IF NOT EXISTS market_prices (id TEXT PRIMARY KEY NOT NULL, item_id TEXT NOT NULL, price REAL NOT NULL, timestamp INTEGER NOT NULL, author_id TEXT NOT NULL, signature TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS idx_cards_author_timestamp ON cards(author_id, timestamp);
     `);
 
@@ -206,8 +209,29 @@ export const initDB = async () => {
     // NEW: Reconcile the queue before rebuilding FTS
     await reconcileUmpireQueue();
 
-    // 4. Re-create FTS from a clean slate
-    await db.execAsync("CREATE VIRTUAL TABLE fts_cards USING fts5(title, body, topic, subject, content='cards');");
+    // Schema Migrations for Phase 1
+    try {
+      await db.execAsync(`
+        ALTER TABLE inventory ADD COLUMN macros TEXT;
+      `);
+      console.log(">> DB: Added macros column to inventory");
+    } catch (e) {
+      // Column might already exist
+    }
+
+    try {
+      await db.execAsync(`
+        ALTER TABLE inventory ADD COLUMN shelf_life_days INTEGER;
+      `);
+      console.log(">> DB: Added shelf_life_days column to inventory");
+    } catch (e) {
+      // Column might already exist
+    }
+
+    // Initialize FTS Table
+    await db.execAsync(`
+      CREATE VIRTUAL TABLE fts_cards USING fts5(title, body, topic, subject, author_id, content=cards, content_rowid=rowid);
+    `);
 
     // Drop all possible old triggers before creating new ones
     await db.execAsync(`
@@ -586,18 +610,51 @@ export const searchCards = async (query, filters = {}) => {
       }));
     }
 
-    // Run query through the Semantic Engine
-    const expandedTerms = expandQuery(query);
+    // 1. Natural Language Negation Parser
+    const tokens = query.toLowerCase().split(' ');
+    const negationKeywords = ['without', 'not', 'no', 'excluding'];
+    
+    let isNegationMode = false;
+    let positiveTokens = [];
+    let negativeTokens = [];
 
-    if (!expandedTerms || expandedTerms.length === 0) return [];
+    tokens.forEach(token => {
+      if (negationKeywords.includes(token)) {
+        isNegationMode = true;
+      } else {
+        if (isNegationMode) {
+          negativeTokens.push(token);
+        } else {
+          positiveTokens.push(token);
+        }
+      }
+    });
 
-    // Build a robust FTS5 'OR' string (e.g., '"cooking"* OR "culinary"* OR "recipe"*')
-    const ftsQuery = expandedTerms.map(term => {
+    // Run query through the Semantic Engine separately for positive and negative
+    const expandedPositives = expandQuery(positiveTokens.join(' '));
+    const expandedNegatives = negativeTokens.length > 0 ? expandQuery(negativeTokens.join(' ')) : [];
+
+    if (!expandedPositives || expandedPositives.length === 0) return [];
+
+    // Build FTS5 strings
+    const posQuery = expandedPositives.map(term => {
       const sanitizedTerm = term.replace(/'/g, "''");
       return `"${sanitizedTerm}"*`;
     }).join(' OR ');
 
-    // 3. FIX THE FTS ALIAS: Use 'fts_cards MATCH' instead of 'f MATCH' to satisfy SQLite 5 constraints
+    let ftsQuery = posQuery;
+
+    if (expandedNegatives.length > 0) {
+      const negQuery = expandedNegatives.map(term => {
+        const sanitizedTerm = term.replace(/'/g, "''");
+        return `"${sanitizedTerm}"*`;
+      }).join(' OR ');
+      
+      // Wrap in parentheses for complex FTS logic: (A OR B) NOT (C OR D)
+      ftsQuery = `(${posQuery}) NOT (${negQuery})`;
+    }
+
+    // Use 'fts_cards MATCH' to satisfy SQLite 5 constraints
     const whereClauses = ["fts_cards MATCH ?"];
     const params = [ftsQuery];
 
@@ -652,6 +709,8 @@ export const searchCards = async (query, filters = {}) => {
             GROUP BY vc.claimant
         )
         SELECT c.*, 
+               snippet(fts_cards, 1, '', '', '...', 64) AS search_snippet,
+               bm25(fts_cards) as fts_score,
                CASE WHEN ts.publicKey IS NOT NULL OR c.author_id = '${filters.profileHandle || ''}' THEN 1 ELSE 0 END AS is_trusted,
                COALESCE(rs.fitness_rep, 0) as fitness_rep,
                COALESCE(rs.nutrition_rep, 0) as nutrition_rep,
@@ -702,6 +761,7 @@ export const searchCards = async (query, filters = {}) => {
             return b.is_trusted - a.is_trusted;
         }
         if (b.expertiseScore !== a.expertiseScore) return b.expertiseScore - a.expertiseScore;
+        if (a.fts_score !== b.fts_score) return a.fts_score - b.fts_score; // FTS5 bm25 is smaller = better match
         return b.timestamp - a.timestamp;
     });
 
@@ -1265,6 +1325,111 @@ export const reconcileUmpireQueue = async () => {
     console.error(">> DB: Failed to reconcile umpire queue:", error);
   }
 };
+// --- NEW: INVENTORY / FRIDGE FUNCTIONS ---
 
+export const addOrUpdateInventoryItem = async (item) => {
+  const cleanId = item.rawText.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const newPrice = parseFloat(item.price);
+  const now = new Date().toISOString();
+
+  // Fuzzy Match against the Nutritional Matrix
+  const matrixMatch = matchToNutritionalMatrix(item.rawText);
+  
+  const finalId = matrixMatch ? matrixMatch.id : cleanId;
+  const finalName = matrixMatch ? matrixMatch.id : item.rawText;
+  const macrosJson = matrixMatch ? JSON.stringify(matrixMatch.macros) : null;
+  const shelfLife = matrixMatch ? matrixMatch.shelf_life_days : null;
+
+  try {
+    // Check if the item already exists
+    const existing = await db.getFirstAsync('SELECT * FROM inventory WHERE id = ?', [finalId]);
+    
+    let delta = 0;
+
+    if (existing) {
+      // Update existing item, push current_price to previous_price
+      const prevPrice = existing.current_price;
+      delta = newPrice - prevPrice;
+      
+      await db.runAsync(
+        `UPDATE inventory SET 
+          current_price = ?, 
+          previous_price = ?, 
+          quantity = quantity + ?, 
+          last_purchased_date = ?,
+          macros = ?,
+          shelf_life_days = ?
+         WHERE id = ?`,
+        [newPrice, prevPrice, item.quantity || 1, now, macrosJson, shelfLife, finalId]
+      );
+    } else {
+      // Insert new item
+      await db.runAsync(
+        `INSERT INTO inventory (id, item_name, current_price, previous_price, quantity, last_purchased_date, macros, shelf_life_days) 
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [finalId, finalName, newPrice, null, item.quantity || 1, now, macrosJson, shelfLife]
+      );
+    }
+
+    // Return the delta for the UI to display (+/-)
+    return { ...item, id, delta, previousPrice: existing ? existing.current_price : null };
+  } catch (error) {
+    console.error(">> Add/Update Inventory Failed:", error);
+    return { ...item, delta: 0, error: true };
+  }
+};
+
+export const getInventoryItems = async () => {
+  try {
+    const results = await db.getAllAsync('SELECT * FROM inventory ORDER BY last_purchased_date DESC');
+    return results;
+  } catch (error) {
+    console.error(">> Fetch Inventory Failed:", error);
+    return [];
+  }
+};
+
+export const deleteInventoryItem = async (id) => {
+  try {
+    await db.runAsync('DELETE FROM inventory WHERE id = ?', [id]);
+  } catch (error) {
+    console.error(">> Delete Inventory Failed:", error);
+  }
+};
+
+export const getLocalPricesForBroadcast = async () => {
+  try {
+    const results = await db.getAllAsync('SELECT id as item_id, current_price as price FROM inventory ORDER BY last_purchased_date DESC LIMIT 10');
+    return results;
+  } catch (error) {
+    console.error(">> Error fetching local prices for broadcast:", error);
+    return [];
+  }
+};
+
+export const syncMarketPrices = async (verifiedPricesArray, authorId, signature) => {
+  try {
+    const now = Date.now();
+    for (const item of verifiedPricesArray) {
+      const id = `${authorId}_${item.item_id}`;
+      await db.runAsync(
+        `INSERT OR REPLACE INTO market_prices (id, item_id, price, timestamp, author_id, signature) VALUES (?, ?, ?, ?, ?, ?)`,
+        [id, item.item_id, item.price, now, authorId, signature]
+      );
+    }
+    console.log(`>> DB: Synced ${verifiedPricesArray.length} market prices from ${authorId}`);
+  } catch (error) {
+    console.error(">> Error syncing market prices:", error);
+  }
+};
+
+export const getMarketPrices = async () => {
+  try {
+    return await db.getAllAsync('SELECT * FROM market_prices ORDER BY timestamp DESC');
+  } catch (error) {
+    console.error(">> Fetch Market Prices Failed:", error);
+    return [];
+  }
+};
 
 export default db;

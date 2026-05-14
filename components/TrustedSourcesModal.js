@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
-import { Modal, View, Text, TouchableOpacity, FlatList, StyleSheet, ScrollView, SafeAreaView } from 'react-native';
+import { Modal, View, Text, TouchableOpacity, FlatList, StyleSheet, ScrollView, SafeAreaView, Switch } from 'react-native';
 
-export default function TrustedSourcesModal({ visible, onClose, sources, cards = [], onFilterBySource }) {
+export default function TrustedSourcesModal({ visible, onClose, sources, cards = [], onFilterBySource, concertModeEnabled, onToggleConcertMode, onDeploySquadRadar }) {
   const [selectedSource, setSelectedSource] = useState(null);
 
   // Step 5: The List View (renderSourceItem)
@@ -155,6 +155,25 @@ export default function TrustedSourcesModal({ visible, onClose, sources, cards =
                 </TouchableOpacity>
               </View>
 
+              <View style={styles.tacticalControls}>
+                <View style={styles.toggleRow}>
+                  <View>
+                    <Text style={styles.toggleLabel}>[ CONCERT MODE ]</Text>
+                    <Text style={styles.toggleSub}>Auto-pull drops from trusted sources.</Text>
+                  </View>
+                  <Switch
+                    value={concertModeEnabled}
+                    onValueChange={onToggleConcertMode}
+                    trackColor={{ false: '#333', true: 'rgba(0, 255, 0, 0.3)' }}
+                    thumbColor={concertModeEnabled ? '#00FF00' : '#888'}
+                  />
+                </View>
+
+                <TouchableOpacity style={styles.radarButton} onPress={onDeploySquadRadar}>
+                  <Text style={styles.radarButtonText}>[ DEPLOY SQUAD RADAR ]</Text>
+                </TouchableOpacity>
+              </View>
+
               <FlatList
                 data={sources}
                 keyExtractor={item => item.uid}
@@ -202,6 +221,45 @@ const styles = StyleSheet.create({
   handleText: { color: '#FFF', fontWeight: 'bold', fontSize: 16, fontFamily: 'Courier New' },
   tapHint: { color: '#444', fontSize: 10, fontWeight: 'bold', textAlign: 'right', marginTop: 5 },
   emptyText: { color: '#666', fontFamily: 'Courier New', textAlign: 'center', marginTop: 50 },
+
+  tacticalControls: {
+    padding: 20,
+    borderBottomWidth: 1,
+    borderColor: '#222',
+    backgroundColor: '#0a0a0a',
+  },
+  toggleRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 15,
+  },
+  toggleLabel: {
+    color: '#00FF00',
+    fontFamily: 'Courier New',
+    fontWeight: 'bold',
+    fontSize: 14,
+  },
+  toggleSub: {
+    color: '#888',
+    fontSize: 10,
+    fontFamily: 'Courier New',
+    marginTop: 2,
+  },
+  radarButton: {
+    backgroundColor: 'rgba(0, 255, 0, 0.1)',
+    borderWidth: 1,
+    borderColor: '#00FF00',
+    padding: 15,
+    borderRadius: 5,
+    alignItems: 'center',
+  },
+  radarButtonText: {
+    color: '#00FF00',
+    fontFamily: 'Courier New',
+    fontWeight: 'bold',
+    letterSpacing: 1,
+  },
 
   detailHeader: { 
     flexDirection: 'row', 

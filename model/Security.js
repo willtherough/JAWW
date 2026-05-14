@@ -174,25 +174,30 @@ export const verifyChain = (card, allowSystemBypass = false) => {
   let previousSignature = card.genesis.signature;
 
   for (const entry of (card.history || [])) {
+    // Skip Genesis duplicate blocks (their signature is already validated)
+    if (entry.action === 'CREATED' && !entry.signature) {
+        continue;
+    }
+
     // Determine the expected message to verify based on the action
     let messageToVerify;
     if (entry.action === 'FORK' || entry.action === 'CREATED') {
         // Forks and Creations just sign their own key chained to the previous signature
-        messageToVerify = previousSignature + senderKey;
+        messageToVerify = previousSignature + entry.from;
     } else {
         // Transfers sign the receiver's key chained to the previous signature
-        messageToVerify = previousSignature + receiverKey;
+        messageToVerify = previousSignature + entry.to;
     }
 
     const isHopValid = verifySignature(
       messageToVerify,
       entry.signature,
-      senderKey
+      entry.from
     );
     
     if (!isHopValid) {
       console.error(`\n\n🚨 >> CRYPTO FAIL: Chain Verification Broken!`);
-      console.log(`>> FAILED SENDER KEY: ${senderKey}`);
+      console.log(`>> FAILED SENDER KEY: ${entry.from}`);
       console.log(`>> EXPECTED MESSAGE (Prev Sig + Receiver Key): ${messageToVerify}`);
       console.log(`>> PROVIDED SIGNATURE: ${entry.signature}`);
       console.log(`>> FULL BLOCK:`, JSON.stringify(entry));

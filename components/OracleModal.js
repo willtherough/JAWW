@@ -16,7 +16,7 @@ import {
 } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import SearchBar from './SearchBar';
-import { getAllEvents, getCardsByEvent, deleteEvent, getAllCards, insertOrReplaceCard, deleteCard } from '../model/database';
+import { getAllEvents, getCardsByEvent, deleteEvent, getAllCards, insertOrReplaceCard, deleteCard, getInventoryItems, deleteInventoryItem, searchCards } from '../model/database';
 import { aggregateListMacros } from '../utils/NutritionMath';
 import { loadProfile, loadNewsFrequencies, saveNewsFrequencies } from '../model/Storage';
 import { calculateDailyRequirements } from '../utils/BiologyEngine';
@@ -93,29 +93,24 @@ export default function OracleModal({ visible, onClose, masterLibrary = [], funL
           const profile = await loadProfile();
           const profileStr = profile ? `User Profile: Age ${profile.age}, Height ${profile.height}in, Weight ${profile.weight}lbs.` : "User Profile: Not provided.";
           
-          // RAG: 2. Filter Database context
+          // RAG: 2. Filter Database context using semantic FTS FTS
           let relevantCards = [];
           if (vaultScanEnabled) {
-              const keywords = query.toLowerCase().replace(/[^a-z0-9 ]/g, '').split(' ').filter(w => w.length > 3);
-              const scoredCards = masterLibrary.map(c => {
-                  let score = 0;
-                  const titleStr = (c.title || '').toLowerCase();
-                  const bodyStr = (c.body || '').toLowerCase();
-                  keywords.forEach(k => {
-                      if (titleStr.includes(k)) score += 3; // Title matches are highly relevant
-                      if (bodyStr.includes(k)) score += 1;
-                  });
-                  return { card: c, score };
-              }).filter(item => item.score > 0);
-              
-              relevantCards = scoredCards.sort((a, b) => b.score - a.score).map(item => item.card).slice(0, 5);
+              const searchResults = await searchCards(query, { activeTopicFilter: 'all', enforceBroadcastRule: false });
+              relevantCards = searchResults.slice(0, 10); // Take top 10 most relevant hits using snippets
           }
           
           setAiCitations(relevantCards);
           
-          const dbStr = relevantCards.length > 0 ? "Relevant User Database Cards:\n" + relevantCards.map(c => `[Type: ${c.type || c.topic}] ${c.title}: ${c.body}`).join('\n') : "No relevant cards found.";
+          const dbStr = relevantCards.length > 0 ? "Relevant User Database Cards:\n" + relevantCards.map(c => `[Type: ${c.type || c.topic}] ${c.title}: ${c.search_snippet || c.body}`).join('\n') : "No relevant cards found.";
           
-          const sysPrompt = `You are JAWW Oracle, an extremely logical offline AI. Answer the user based ONLY on the following context. Do not hallucinate data.\n\n${profileStr}\n\n${dbStr}`;
+          // RAG: 3. Fetch Fridge Inventory
+          const fridgeItems = await getInventoryItems();
+          const fridgeStr = fridgeItems.length > 0 
+            ? "Current Fridge Inventory:\n" + fridgeItems.map(i => `- ${i.quantity}x ${i.item_name}`).join('\n') 
+            : "Current Fridge Inventory: Empty.";
+
+          const sysPrompt = `You are JAWW Oracle, an extremely logical offline AI. Answer the user based ONLY on the following context. Do not hallucinate data.\n\n${profileStr}\n\n${fridgeStr}\n\n${dbStr}`;
           
           await generateResponse(sysPrompt, query, (token) => {
               setAiResponse(prev => prev + token);
@@ -206,9 +201,83 @@ export default function OracleModal({ visible, onClose, masterLibrary = [], funL
   const library = [...masterLibrary, ...funLibrary];
 
   // --- PHASE 5: FRIDGE STATE ---
-  const fridgeItems = useMemo(() => {
-    return library.filter(c => c.subject && c.subject.startsWith('PURCHASE:'));
-  }, [library]);
+  const [fridgeItems, setFridgeItems] = useState([]);
+  const [selectedFridgeItems, setSelectedFridgeItems] = useState({});
+  const [fridgeMacroTotals, setFridgeMacroTotals] = useState({ protein: 0, calories: 0 });
+
+  useEffect(() => {
+    if (visible && activeTab === 'FRIDGE') {
+        loadFridge();
+    }
+  }, [visible, activeTab]);
+
+  const loadFridge = async () => {
+      const items = await getInventoryItems();
+      
+      const now = new Date();
+      let totalProtein = 0;
+      let totalCalories = 0;
+
+      const processedItems = items.map(item => {
+          let isSpoiling = false;
+          let macros = null;
+
+          if (item.macros) {
+              try { macros = JSON.parse(item.macros); } catch(e) {}
+          }
+
+          if (item.shelf_life_days) {
+              const purchased = new Date(item.last_purchased_date);
+              const daysOld = (now - purchased) / (1000 * 60 * 60 * 24);
+              if (daysOld >= item.shelf_life_days - 1) { // Alert 1 day before
+                  isSpoiling = true;
+              }
+          }
+
+          if (macros) {
+              totalProtein += (macros.protein_g || 0) * item.quantity;
+              totalCalories += (macros.calories || 0) * item.quantity;
+          }
+
+          return { ...item, isSpoiling, macros };
+      });
+
+      setFridgeItems(processedItems);
+      setFridgeMacroTotals({ protein: totalProtein, calories: totalCalories });
+  };
+
+  const toggleFridgeSelection = (id) => {
+      setSelectedFridgeItems(prev => ({
+          ...prev,
+          [id]: !prev[id]
+      }));
+  };
+
+  const handleCompileMeal = async () => {
+      const selectedIds = Object.keys(selectedFridgeItems).filter(id => selectedFridgeItems[id]);
+      if (selectedIds.length === 0) {
+          Alert.alert("Empty Plate", "Select items from your Fridge to compile a meal.");
+          return;
+      }
+
+      const selectedNames = fridgeItems.filter(i => selectedIds.includes(i.id)).map(i => i.item_name);
+
+      Alert.alert("Compiling Meal", `Compiling meal from ${selectedIds.length} ingredients: ${selectedNames.join(', ')}.\n\nDeducting from inventory and logging to Biology Engine...`);
+      
+      // Basic implementation for compiling:
+      // 1. Delete selected items from inventory (or reduce quantity)
+      for (const id of selectedIds) {
+          await deleteInventoryItem(id);
+      }
+      
+      // 2. Clear selection and reload
+      setSelectedFridgeItems({});
+      loadFridge();
+
+      // 3. Optional: Trigger MealPlannerModal or log a card.
+      // We will open the MealPlannerModal and pre-fill the name or just let the user log it.
+      setIsMealPlannerVisible(true);
+  };
 
   const handleCheckPrices = () => {
     if (groceryList.length === 0) {
@@ -740,21 +809,52 @@ export default function OracleModal({ visible, onClose, masterLibrary = [], funL
                                 </TouchableOpacity>
                             </View>
 
+                            {/* DEGRADATION ENGINE ALERTS */}
+                            {fridgeMacroTotals.calories < (bioTargets.maintain.calories * 3) && (
+                                <View style={[styles.arbitrageAlert, { marginBottom: 15, borderColor: '#EF4444', backgroundColor: 'rgba(239, 68, 68, 0.1)' }]}>
+                                    <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 6 }}>
+                                        <Feather name="alert-triangle" size={16} color="#EF4444" />
+                                        <Text style={[styles.arbitrageTitle, { color: '#EF4444' }]}>[ RESUPPLY REQUIRED ]</Text>
+                                    </View>
+                                    <Text style={[styles.arbitrageText, { color: '#FCA5A5' }]}>
+                                        Total Fridge Calories ({fridgeMacroTotals.calories.toFixed(0)}) falls below your required 3-day survival threshold. Restock recommended.
+                                    </Text>
+                                </View>
+                            )}
+
                             <FlatList 
                                 data={fridgeItems}
                                 keyExtractor={item => item.id}
                                 renderItem={({ item }) => {
-                                    let details = { store: 'Unknown', price: 0, date: '' };
-                                    try { details = JSON.parse(item.body); } catch(e) {}
-                                    
+                                    const isSelected = selectedFridgeItems[item.id];
                                     return (
-                                        <View style={styles.resultItem}>
+                                        <TouchableOpacity 
+                                            style={[styles.resultItem, isSelected && { borderColor: '#10B981', borderWidth: 1 }]}
+                                            onPress={() => toggleFridgeSelection(item.id)}
+                                        >
                                             <View style={styles.resultHeader}>
-                                                <Text style={styles.resultTitle}>{item.title}</Text>
-                                                <Text style={styles.resultCategory}>${details.price} @ {details.store}</Text>
+                                                <Text style={styles.resultTitle}>{item.item_name}</Text>
+                                                <Text style={styles.resultCategory}>${item.current_price.toFixed(2)} (Qty: {item.quantity})</Text>
                                             </View>
-                                            <Text style={styles.resultPreview}>{new Date(details.date || item.timestamp).toLocaleDateString()}</Text>
-                                        </View>
+                                            {item.isSpoiling && (
+                                                <View style={{backgroundColor: '#EF4444', padding: 2, borderRadius: 4, marginTop: 4, alignSelf: 'flex-start'}}>
+                                                    <Text style={{color: '#000', fontSize: 10, fontWeight: 'bold', fontFamily: 'Courier'}}>! SPOILING</Text>
+                                                </View>
+                                            )}
+                                            {item.macros && (
+                                                <Text style={{color: '#38BDF8', fontSize: 10, fontFamily: 'Courier', marginTop: 4}}>
+                                                    +{item.macros.protein_g}g Protein / {item.macros.calories} kcal
+                                                </Text>
+                                            )}
+                                            <View style={{flexDirection: 'row', justifyContent: 'space-between', marginTop: 8}}>
+                                                <Text style={styles.resultPreview}>Secured: {new Date(item.last_purchased_date).toLocaleDateString()}</Text>
+                                                {item.previous_price && (
+                                                    <Text style={{color: item.current_price > item.previous_price ? '#EF4444' : '#10B981', fontSize: 10, fontFamily: 'Courier'}}>
+                                                        {item.current_price > item.previous_price ? '▲' : '▼'} Prev: ${item.previous_price.toFixed(2)}
+                                                    </Text>
+                                                )}
+                                            </View>
+                                        </TouchableOpacity>
                                     );
                                 }}
                                 contentContainerStyle={{ paddingBottom: 20 }}
@@ -766,8 +866,11 @@ export default function OracleModal({ visible, onClose, masterLibrary = [], funL
                             />
 
                             <View style={{ flexDirection: 'row', gap: 10, marginTop: 10 }}>
+                                <TouchableOpacity style={[styles.footBtnMain, { flex: 1, borderColor: '#10B981' }]} onPress={handleCompileMeal}>
+                                    <Text style={[styles.footTextMain, { color: '#10B981' }]}>[ COMPILE MEAL ]</Text>
+                                </TouchableOpacity>
                                 <TouchableOpacity style={[styles.footBtnMain, { flex: 1 }]} onPress={() => onNavigate('scan_receipt')}>
-                                    <Text style={styles.footTextMain}>SCAN RECEIPT</Text>
+                                    <Text style={styles.footTextMain}>[ SCAN RECEIPT ]</Text>
                                 </TouchableOpacity>
                             </View>
                         </View>

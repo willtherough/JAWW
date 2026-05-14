@@ -67,16 +67,6 @@ export default function TacticalScanner({ devices, onNodeTap, isScanning }) {
                 style={styles.radarBox}
                 onLayout={(event) => setRadarHeight(event.nativeEvent.layout.height)}
             >
-                {/* The Scanning Laser Line */}
-                {isScanning && (
-                    <Animated.View 
-                        style={[
-                            styles.scanLine, 
-                            { transform: [{ translateY: scanLineAnim }] }
-                        ]} 
-                    />
-                )}
-
                 {/* Plotting the Nodes */}
                 {devices.map((device) => {
                     const position = getCoordinates(device.rssi, device.id);
@@ -85,17 +75,17 @@ export default function TacticalScanner({ devices, onNodeTap, isScanning }) {
                     const isAnswer = device.subject && device.subject.startsWith('RE:');
                     const isQuestion = device.isQuestion || (device.subject && device.subject.startsWith('QUESTION:'));
 
-                    // Default Tactical Green
-                    let blipColor = '#10B981'; 
+                    // Default Workshop Amber
+                    let blipColor = '#F59E0B'; 
                     let blipSize = 14;
                     let blipText = '';
 
                     if (isQuestion) {
-                        blipColor = '#F59E0B'; // Amber for Questions
+                        blipColor = '#E11D48'; // Rose/Red for Questions
                         blipSize = 22;
                         blipText = 'Q';
                     } else if (isAnswer) {
-                        blipColor = '#38BDF8'; // Blue for Answers
+                        blipColor = '#38BDF8'; // Sky Blue for Answers
                         blipSize = 22;
                         blipText = 'A';
                     }
@@ -171,14 +161,20 @@ const styles = StyleSheet.create({
     },
     radarBox: {
         flex: 1,
-        backgroundColor: '#000000',
+        backgroundColor: '#0B1120', // Deep blueprint slate
         position: 'relative',
+        borderColor: '#1E293B',
+        borderWidth: 1,
+        margin: 10,
+        borderRadius: 8,
+        overflow: 'hidden',
     },
     gridOverlay: {
         ...StyleSheet.absoluteFillObject,
-        opacity: 0.1,
-        // If you want actual grid lines, you can use a repeating background image 
-        // or draw multiple borders here. For now, a solid dark box with a border looks tactical.
+        opacity: 0.05,
+        borderWidth: 1,
+        borderColor: '#38BDF8',
+        borderRadius: 8,
     },
     scanLine: {
         width: '100%',
