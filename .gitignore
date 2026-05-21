@@ -37,8 +37,6 @@ yarn-error.*
 *.tsbuildinfo
 
 # generated native folders
-/ios
-/android
 
 # Large Android / Gradle caches
 .gradle-local/
