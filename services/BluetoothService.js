@@ -14,9 +14,9 @@ const COMPANY_ID = 0x00FF;
 const UNIQUE_KEY_STORAGE = 'SOURCE_UNIQUE_KEY';
 
 // ENGINE 4 UUIDs
-export const TRANSFER_SERVICE_UUID = 'baba0001-1234-5678-9abc-def012345678';
-export const TRANSFER_CHAR_UUID = 'baba0002-1234-5678-9abc-def012345678';
-export const HANDSHAKE_CHAR_UUID = 'baba0003-1234-5678-9abc-def012345678';
+export const TRANSFER_SERVICE_UUID = 'baba0099-1234-5678-9abc-def012345678';
+export const TRANSFER_CHAR_UUID = 'baba0098-1234-5678-9abc-def012345678';
+export const HANDSHAKE_CHAR_UUID = 'baba0097-1234-5678-9abc-def012345678';
 
 const MTU = 512;
 
@@ -63,6 +63,20 @@ const truncateToSafeBytes = (str, maxBytes) => {
         pauseAutomatedHunt() {
             console.log(">> RADAR YIELD: Manual operation detected. Pausing background hunt.");
             this.isRadarActive = true;
+        }
+
+        async _safeConnectLE(deviceId, options) {
+            try {
+                if (Platform.OS === 'android' && NativeModules.SourceGattModule?.forceConnectLE) {
+                    console.log(`>> MESH: Bypassing Dual-Mode flaw. Forcing TRANSPORT_LE to ${deviceId}...`);
+                    await NativeModules.SourceGattModule.forceConnectLE(deviceId);
+                    // Give the OS 400ms to establish the physical LE link before telling react-native-ble-plx to piggyback
+                    await new Promise(r => setTimeout(r, 400));
+                }
+            } catch (e) {
+                console.log(`>> MESH: Native LE Bridge warning: ${e.message}`);
+            }
+            return await this.manager.connectToDevice(deviceId, options);
         }
 
         // Call this when the user returns to the main feed
@@ -214,8 +228,9 @@ const truncateToSafeBytes = (str, maxBytes) => {
             }
         }
 
-        setHandle(handle) {
+        setHandle(handle, alias = '') {
             this.userHandle = handle;
+            this.deviceAlias = alias;
         }
 
         async initialize() {
@@ -313,7 +328,8 @@ const truncateToSafeBytes = (str, maxBytes) => {
             
             const isQuestionArmed = advertisedCard && advertisedCard.title && advertisedCard.title.startsWith("QUESTION:");
 
-            let handlePortion = this.userHandle;
+            let baseHandle = this.deviceAlias ? `${this.userHandle}_${this.deviceAlias}` : this.userHandle;
+            let handlePortion = baseHandle;
             if (!handlePortion) {
                 console.error(">> BROADCAST ABORTED: Valid Operator Handle Required.");
                 this.updateState('ERROR');
@@ -323,7 +339,7 @@ const truncateToSafeBytes = (str, maxBytes) => {
         // 1. THE SCOPE FIX: Use 'this.userHandle' (not 'handle')
             // 2. THE REDUNDANCY FIX: Don't append the subject twice for Umpires
             if (isUmpire) {
-                const shortHandle = this.userHandle ? this.userHandle.substring(0, 4) : "Node";
+                const shortHandle = baseHandle ? baseHandle.substring(0, 4) : "Node";
                 // Result: U:Neo:Workouts
                 handlePortion = `U:${shortHandle}:${subject || 'General'}`;
             } else if (isQuestionArmed) {
@@ -575,6 +591,7 @@ const truncateToSafeBytes = (str, maxBytes) => {
             }
 
             console.log(`>> MESH SYNC: Connecting to ${targetDeviceId} (${targetHandleOrId})...`);
+            DeviceEventEmitter.emit('syncStarted', { target: targetHandleOrId });
             
             // >>> PHASE 1: THE SUBMARINE DIVE <<<
             this.pauseAutomatedHunt();
@@ -616,7 +633,7 @@ const truncateToSafeBytes = (str, maxBytes) => {
                     // Submarine dive already executed above, ensuring clean slate.
                     
                     // >>> PHASE 2: HARDWARE SANITIZATION (refreshGatt) <<<
-                    device = await this.manager.connectToDevice(targetDeviceId, { timeout: 15000, refreshGatt: 'OnConnected' });
+                    device = await this._safeConnectLE(targetDeviceId, { timeout: 15000, refreshGatt: 'OnConnected' });
                     
                     // >>> PHASE 2: NATIVE CHRONOLOGICAL SEQUENCE <<<
                     try { await device.requestConnectionPriority(1); } catch (e) {}
@@ -626,6 +643,7 @@ const truncateToSafeBytes = (str, maxBytes) => {
                     await new Promise(r => setTimeout(r, isTrusted ? 100 : 500));
                     
                     if (!(await device.isConnected())) throw new Error("Device disconnected before discovery.");
+                    DeviceEventEmitter.emit('meshSyncLog', `Connection made to ${targetHandleOrId}...`);
                     await device.discoverAllServicesAndCharacteristics();
 
                     // --- 1. POPULATE SENDER IDENTITY & HASH ---
@@ -664,6 +682,7 @@ const truncateToSafeBytes = (str, maxBytes) => {
                             
                             if (combinedBuffer.includes('__EOF__')) {
                                 console.log(">> MESH SYNC: EOF Received. Processing return ping...");
+                                DeviceEventEmitter.emit('meshSyncLog', `Analyzing delta payloads...`);
                                 const finalData = combinedBuffer.replace('__EOF__', '');
                                 this.incomingBuffer = ""; 
                                 
@@ -762,7 +781,7 @@ const truncateToSafeBytes = (str, maxBytes) => {
                         }
                         
                         console.log(`>> MESH: Connecting to ${targetHandle} (${targetDeviceId})...`);
-                        const device = await this.manager.connectToDevice(targetDeviceId, { timeout: 5000 }); // Bumped timeout slightly for safety
+                        const device = await this._safeConnectLE(targetDeviceId, { timeout: 5000 }); // Bumped timeout slightly for safety
                         
                         // --- THE 20-BYTE LIMIT FIX ---
                         try {
@@ -872,7 +891,7 @@ const truncateToSafeBytes = (str, maxBytes) => {
 
                     console.log(">> CLIENT: Connecting...");
                     // >>> PHASE 2: HARDWARE SANITIZATION (refreshGatt) <<<
-                    device = await this.manager.connectToDevice(targetDeviceId, { timeout: Math.min(15000, customTimeoutMs), autoConnect: false, refreshGatt: 'OnConnected' });
+                    device = await this._safeConnectLE(targetDeviceId, { timeout: Math.min(15000, customTimeoutMs), autoConnect: false, refreshGatt: 'OnConnected' });
                     console.log(`>> CLIENT: Connected to ${device.id}.`);
 
                     disconnectionSubscription = device.onDisconnected((error, d) => {
@@ -1161,7 +1180,7 @@ const truncateToSafeBytes = (str, maxBytes) => {
             this.updateState('CONNECTING');
 
             try {
-                const device = await this.manager.connectToDevice(umpireDeviceId, { timeout: 10000 });
+                const device = await this._safeConnectLE(umpireDeviceId, { timeout: 10000 });
                 await new Promise(r => setTimeout(r, 500));
                 if (!(await device.isConnected())) throw new Error("Device disconnected before discovery.");
                 await device.discoverAllServicesAndCharacteristics();
@@ -1192,7 +1211,7 @@ const truncateToSafeBytes = (str, maxBytes) => {
         async syncMarketPricesWithPeer(targetDeviceId) {
             console.log(`>> MESH: Requesting Price Sync from ${targetDeviceId}`);
             try {
-                const device = await this.manager.connectToDevice(targetDeviceId, { timeout: 10000 });
+                const device = await this._safeConnectLE(targetDeviceId, { timeout: 10000 });
                 await new Promise(r => setTimeout(r, 500));
                 if (!(await device.isConnected())) throw new Error("Device disconnected before discovery.");
                 await device.discoverAllServicesAndCharacteristics();
@@ -1276,7 +1295,7 @@ const truncateToSafeBytes = (str, maxBytes) => {
             let device = null;
 
             try {
-                device = await this.manager.connectToDevice(umpireDeviceId, { timeout: 15000 });
+                device = await this._safeConnectLE(umpireDeviceId, { timeout: 15000 });
                 await new Promise(r => setTimeout(r, 1000)); 
                 
                 console.log(">> UMPIRE SYNC: Requesting MTU 512...");
@@ -1456,7 +1475,7 @@ const truncateToSafeBytes = (str, maxBytes) => {
 
     async sendReturnPing(remoteAddress, finalLedger) {
         try {
-            const device = await this.manager.connectToDevice(remoteAddress, { timeout: 5000 });
+            const device = await this._safeConnectLE(remoteAddress, { timeout: 5000 });
             await new Promise(r => setTimeout(r, 500));
             if (!(await device.isConnected())) throw new Error("Device disconnected before discovery.");
             await device.discoverAllServicesAndCharacteristics();
@@ -1478,7 +1497,7 @@ const truncateToSafeBytes = (str, maxBytes) => {
     async requestDelta(remoteAddress, cardId, localSignatures) {
         try {
             // Reconnect to send the inventory list
-            const device = await this.manager.connectToDevice(remoteAddress, { timeout: 5000 });
+            const device = await this._safeConnectLE(remoteAddress, { timeout: 5000 });
             await new Promise(r => setTimeout(r, 500));
             if (!(await device.isConnected())) throw new Error("Device disconnected before discovery.");
             await device.discoverAllServicesAndCharacteristics();

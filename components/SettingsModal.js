@@ -1,8 +1,28 @@
 import React from 'react';
-import { View, Text, TouchableOpacity, Modal, StyleSheet } from 'react-native';
+import { View, Text, TouchableOpacity, Modal, StyleSheet, TextInput, Alert } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Feather } from '@expo/vector-icons';
 
 const SettingsModal = ({ visible, onClose, onSyncMesh, onSyncGrocery, onSyncNews }) => {
+  const [deviceAlias, setDeviceAlias] = React.useState('');
+
+  React.useEffect(() => {
+    if (visible) {
+      AsyncStorage.getItem('@device_alias').then(alias => {
+        if (alias) setDeviceAlias(alias);
+      });
+    }
+  }, [visible]);
+
+  const saveAlias = async () => {
+    try {
+      await AsyncStorage.setItem('@device_alias', deviceAlias.trim());
+      Alert.alert("Alias Saved", "Your device alias has been updated. This will be broadcasted on the radar. Please restart JAWW to apply changes to the radio.");
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
   return (
     <Modal visible={visible} transparent animationType="slide">
       <View style={styles.overlay}>
@@ -33,6 +53,26 @@ const SettingsModal = ({ visible, onClose, onSyncMesh, onSyncGrocery, onSyncNews
               <Text style={styles.actionBtnText}>SYNC NEWS INTELLIGENCE</Text>
             </TouchableOpacity>
           </View>
+
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>HARDWARE CONFIGURATION</Text>
+            <View style={{ marginBottom: 15 }}>
+              <Text style={{ color: '#00FF00', fontSize: 10, fontFamily: 'Courier', marginBottom: 5 }}>DEVICE ALIAS (OPTIONAL)</Text>
+              <TextInput 
+                style={styles.input}
+                value={deviceAlias}
+                onChangeText={setDeviceAlias}
+                placeholder="e.g. Mobile, Tablet, Home"
+                placeholderTextColor="#005500"
+              />
+              <Text style={{ color: '#666', fontSize: 10, fontFamily: 'Courier', marginTop: 5 }}>
+                Appended to your Handle on the Radar to prevent device collisions (e.g. William_Tablet). Does not affect cryptography.
+              </Text>
+            </View>
+            <TouchableOpacity style={styles.saveBtn} onPress={saveAlias}>
+              <Text style={styles.saveText}>SAVE ALIAS</Text>
+            </TouchableOpacity>
+          </View>
         </View>
       </View>
     </Modal>
@@ -48,7 +88,10 @@ const styles = StyleSheet.create({
   section: { marginBottom: 25 },
   sectionTitle: { color: '#666', fontSize: 12, fontWeight: 'bold', marginBottom: 15, letterSpacing: 1 },
   actionBtn: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#1a1a1a', padding: 15, borderRadius: 8, marginBottom: 10, borderWidth: 1, borderColor: '#333' },
-  actionBtnText: { color: '#fff', fontSize: 14, fontWeight: 'bold', marginLeft: 10, fontFamily: 'Courier' }
+  actionBtnText: { color: '#fff', fontSize: 14, fontWeight: 'bold', marginLeft: 10, fontFamily: 'Courier' },
+  input: { backgroundColor: '#000', color: '#00FF00', padding: 12, borderRadius: 5, borderWidth: 1, borderColor: '#003300', fontWeight: 'bold', fontFamily: 'Courier' },
+  saveBtn: { backgroundColor: '#003300', padding: 15, borderRadius: 5, alignItems: 'center', borderWidth: 1, borderColor: '#00FF00' },
+  saveText: { color: '#00FF00', fontWeight: 'bold', fontFamily: 'Courier', letterSpacing: 1 }
 });
 
 export default SettingsModal;

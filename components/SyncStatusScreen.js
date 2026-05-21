@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { 
   Modal, View, Text, TouchableOpacity, ActivityIndicator, 
-  Animated, StyleSheet, Platform 
+  Animated, StyleSheet, Platform, ScrollView 
 } from 'react-native';
 
 const JAWWMessages = [
@@ -14,9 +14,10 @@ const JAWWMessages = [
   "OFFLINE INTEGRITY: Even completely disconnected from the internet, the cryptographic zipper ensures no block in the ledger can be tampered with."
 ];
 
-const SyncStatusScreen = ({ isVisible, onClose }) => {
+const SyncStatusScreen = ({ isVisible, onClose, logs = [] }) => {
   const [index, setIndex] = useState(0);
   const fadeAnim = useRef(new Animated.Value(1)).current;
+  const scrollViewRef = useRef(null);
 
   useEffect(() => {
     if (!isVisible) return;
@@ -47,6 +48,20 @@ const SyncStatusScreen = ({ isVisible, onClose }) => {
     <Modal visible={isVisible} animationType="slide" transparent={true}>
       <View style={styles.syncModalContainer}>
         
+        {logs.length > 0 && (
+          <View style={styles.logContainer}>
+            <ScrollView 
+              ref={scrollViewRef}
+              onContentSizeChange={() => scrollViewRef.current?.scrollToEnd({ animated: true })}
+              showsVerticalScrollIndicator={false}
+            >
+              {logs.map((log, idx) => (
+                <Text key={idx} style={styles.logText}>{log}</Text>
+              ))}
+            </ScrollView>
+          </View>
+        )}
+
         <ActivityIndicator size="large" color="#F59E0B" style={{ marginBottom: 30 }} />
         
         <Text style={styles.syncModalTitle}>(( ON AIR ))</Text>
@@ -108,6 +123,22 @@ const styles = StyleSheet.create({
     color: '#EF4444',
     fontWeight: 'bold',
     letterSpacing: 1,
+  },
+  logContainer: {
+    width: '90%',
+    maxHeight: 200,
+    backgroundColor: '#000',
+    padding: 15,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#334155',
+    marginBottom: 30,
+  },
+  logText: {
+    color: '#10B981',
+    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+    fontSize: 12,
+    marginBottom: 4,
   }
 });
 

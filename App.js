@@ -130,23 +130,44 @@ const calculateTrueHops = (historyArray) => {
   }
 
   const nodeDepths = new Map();
-  let maxDepth = 0;
-
+  
+  // 1. Initialize Genesis Depths
   historyArray.forEach(entry => {
-    let currentDepth = 1;
-    const senderKey = entry.fromKey || entry.from || entry.sender_id || entry.author;
-    const receiverKey = entry.toKey || entry.to || entry.receiver_id || entry.userKey || entry.user;
-
     if (entry.action === 'CREATED' || entry.action === 'GENESIS') {
-      currentDepth = 1;
-      if (receiverKey) nodeDepths.set(receiverKey, currentDepth);
-    } else {
-      const parentDepth = nodeDepths.get(senderKey) || 0;
-      currentDepth = parentDepth + 1;
-      if (receiverKey) nodeDepths.set(receiverKey, currentDepth);
+      const receiverKey = entry.toKey || entry.to || entry.receiver_id || entry.userKey || entry.user;
+      if (receiverKey) nodeDepths.set(receiverKey, 1);
     }
+  });
 
-    if (currentDepth > maxDepth) maxDepth = currentDepth;
+  // 2. Iterative Relaxation (Immune to sorting order and clock drift)
+  let changed = true;
+  let iterations = 0;
+  while (changed && iterations < historyArray.length) {
+    changed = false;
+    iterations++;
+    
+    historyArray.forEach(entry => {
+      if (entry.action === 'CREATED' || entry.action === 'GENESIS') return;
+      
+      const senderKey = entry.fromKey || entry.from || entry.sender_id || entry.author;
+      const receiverKey = entry.toKey || entry.to || entry.receiver_id || entry.userKey || entry.user;
+      
+      const parentDepth = nodeDepths.get(senderKey) || 0;
+      const currentReceiverDepth = nodeDepths.get(receiverKey) || 0;
+      
+      // Only set the receiver's depth the FIRST time they receive it (Shortest Path to Genesis)
+      // This mathematically prevents A->B->A->B from inflating the ranking (Sybil protection)
+      if (parentDepth > 0 && currentReceiverDepth === 0) {
+        nodeDepths.set(receiverKey, parentDepth + 1);
+        changed = true;
+      }
+    });
+  }
+
+  // 3. Find the maximum depth
+  let maxDepth = 0;
+  nodeDepths.forEach(depth => {
+    if (depth > maxDepth) maxDepth = depth;
   });
 
   return maxDepth > 0 ? maxDepth : historyArray.length;
@@ -729,6 +750,7 @@ export default function App() {
 
   // NEW: Synchronous lock to prevent the GATT Bomb
   const umpireSyncLockRef = useRef(new Set());
+  const isGrabbingRef = useRef(false);
 
   // --- SHADOW HOP SYNCHRONIZER ---
   // This effect monitors when the app is brought to the foreground.
@@ -984,6 +1006,16 @@ export default function App() {
     });
 
     // This catches both Will's and Neo's Final Seal Events
+    const syncStartedListener = DeviceEventEmitter.addListener('syncStarted', (data) => {
+      if (Platform.OS === 'android') {
+        ToastAndroid.show(`Syncing ledgers with ${data.target}...`, ToastAndroid.SHORT);
+      }
+    });
+
+    const meshSyncLogListener = DeviceEventEmitter.addListener('meshSyncLog', (log) => {
+      setSyncLogs(prev => [...prev, log]);
+    });
+
     const meshSyncCompleteListener = DeviceEventEmitter.addListener('meshSyncComplete', async (data) => {
       const { cardId, mergedHistory, added: passedAdded, title: passedTitle } = data;
 
@@ -1002,9 +1034,11 @@ export default function App() {
         if (added > 0) {
           // 1. Show the Toast message
           if (Platform.OS === 'android') {
-            ToastAndroid.show(`Ledger Updated for ${title}!`, ToastAndroid.LONG);
+            ToastAndroid.show(`Ledger for ${title} updated with ${added} new entries! You're going through the mesh!`, ToastAndroid.LONG);
           }
           Vibration.vibrate([0, 100, 50, 100]);
+          
+          setSyncLogs(prev => [...prev, `Updating ledger... ${added} new entries added.`]);
 
           // 2. Set the transient badge state (+X entries)
           setSyncBadges(prev => ({ ...prev, [cardId]: added }));
@@ -1017,6 +1051,10 @@ export default function App() {
               return newState;
             });
           }, 5000);
+        } else {
+          if (Platform.OS === 'android') {
+            ToastAndroid.show("Ledger is updated.", ToastAndroid.SHORT);
+          }
         }
 
         // 4. THE DYNAMIC DEPTH SORT
@@ -1187,8 +1225,10 @@ export default function App() {
       statsListener.remove();
       umpireDataListener.remove();
       syncPingListener.remove();
-      meshSyncReceivedListener.remove();
+      syncStartedListener.remove();
+      meshSyncLogListener.remove();
       meshSyncCompleteListener.remove();
+      meshSyncReceivedListener.remove();
       successListener.remove();
       pendingListener.remove();
       transferCompleteListener.remove();
@@ -1204,16 +1244,15 @@ export default function App() {
         let isRedundant = false;
 
         if (localCard) {
-          // Recalculate the local state key
-          const localLedgerHash = generateLedgerHash(localCard.history);
-
           // THE ULTIMATE REDUNDANCY CHECK:
-          // If the content is the same AND the history triad math is the same, it's a duplicate.
-          if (localCard.hash === header.contentHash && localLedgerHash === header.ledgerHash) {
-            console.log(">> VALIDATION: State Keys match perfectly. Marking Redundant.");
+          // If we ALREADY have this exact card content, it's redundant.
+          // The ONLY way we should accept it is if it's a Fork (different contentHash).
+          // If we already have it, any missing ledger entries should be resolved via SYNC, not manual transfer.
+          if (localCard.hash === header.contentHash) {
+            console.log(">> VALIDATION: We already have this exact card content. Marking Redundant.");
             isRedundant = true;
           } else {
-            console.log(">> VALIDATION: Card is new or updated. Sending ACK.");
+            console.log(">> VALIDATION: Card is a Fork (New Content). Sending ACK.");
           }
         } else {
           console.log(`>> DB: No card found for ID [${header.id}]. Accepting new card.`);
@@ -1226,7 +1265,20 @@ export default function App() {
       }
     });
 
-    const abortListener = DeviceEventEmitter.addListener('transferAborted', ({ reason }) => {
+    const abortListener = DeviceEventEmitter.addListener('transferAborted', async ({ reason }) => {
+      // THE ROLLBACK: If the transfer was aborted (e.g. Redundant Intel), 
+      // we must erase the Escrow block we just created to prevent ghost duplicates.
+      if (global.preEscrowCard) {
+        console.log(`>> ROLLBACK: Erasing Escrow block for Card ${global.preEscrowCard.id}`);
+        await insertOrReplaceCard(global.preEscrowCard);
+        
+        const freshCards = await getAllCards();
+        setCards(freshCards);
+        
+        global.preEscrowCard = null;
+        global.lastSignedPayload = null;
+      }
+
       Alert.alert("Transfer Cancelled", reason);
     });
 
@@ -1329,7 +1381,7 @@ export default function App() {
             universalEntry.umpire = recipientHandle;
           }
 
-          const newHistory = [...safeHistory, universalEntry];
+          const newHistory = mergeAndSortLedgers(safeHistory, [universalEntry]);
           const calculatedHops = calculateTrueHops(newHistory);
 
           const syncedCard = {
@@ -1460,6 +1512,14 @@ export default function App() {
     BluetoothService.setOnStateChange((state) => {
       setSourceState(state);
       if (state === 'IDLE' || state === 'ERROR' || state === 'DATA_RECEIVED') setIsLoading(false);
+      
+      // AUTO-RESTART GATT SERVER IF BLUETOOTH TURNED ON
+      // VECTOR 4 FIX: Ensure we never call startServer() implicitly before permissions are fully resolved.
+      // We will rely on the explicit boot() sequence below to launch it the first time.
+      if (state === 'PoweredOn') {
+        // We only attempt an auto-restart if we already passed the initial boot permission block
+        // try { startServer(); } catch(e){}
+      }
     });
 
     const boot = async () => {
@@ -1490,12 +1550,16 @@ export default function App() {
           publicKey: keys?.publicKey
         };
 
+        // 3.5. Fetch Device Alias for Hardware differentiation
+        const aliasStr = await AsyncStorage.getItem('@device_alias');
+        const deviceAlias = aliasStr ? aliasStr : '';
+
         // 4. Set the final, hydrated profile state in a single, atomic update.
         setProfile(completeProfile);
 
         // 5. Inform services that need the handle.
         if (completeProfile.handle) {
-          BluetoothService.setHandle(completeProfile.handle);
+          BluetoothService.setHandle(completeProfile.handle, deviceAlias);
 
           // 👇 TURN THE KEY HERE 👇
           BluetoothService.startAutomatedGenesisHunt(completeProfile.handle);
@@ -1839,7 +1903,7 @@ export default function App() {
                     event: activeUmpireEvent?.subject || "Mission"
                   });
 
-                  const finalHistory = [...safeHistory, universalEntry];
+                  const finalHistory = mergeAndSortLedgers(safeHistory, [universalEntry]);
                   const calculatedHops = calculateTrueHops(finalHistory);
 
                   const finalizedCard = {
@@ -2055,7 +2119,7 @@ export default function App() {
 
           // 3. Route to New Entry Logic: Process this variant as a brand-new card.
           // 🚨 As per protocol, we DO NOT generate local history. We accept the cryptographically signed history exactly as it is.
-          const finalHistory = incomingCard.history || [];
+          const finalHistory = mergeAndSortLedgers(incomingCard.history || [], []);
 
           cardToSave = {
             ...incomingCard,
@@ -2091,7 +2155,7 @@ export default function App() {
         // 🚨 We NO LONGER append unsigned "shadow" blocks.
         // We accept the Sender's cryptographically signed history exactly as it is.
 
-        const finalHistory = incomingCard.history || [];
+        const finalHistory = mergeAndSortLedgers(incomingCard.history || [], []);
         const calculatedHops = calculateTrueHops(finalHistory);
 
         cardToSave = {
@@ -2154,9 +2218,11 @@ export default function App() {
 
   // --- ENGINE 3: THE GRABBER (Retry Logic + Smart Library) ---
   const handleGrabCard = async (offer, version) => {
-    if (isLoading || sourceState === 'CONNECTING') return;
-
-    console.log(">> GRAB REQUESTED:", offer.title || "Unknown Intel");
+    if (isLoading || sourceState === 'CONNECTING' || isGrabbingRef.current) return;
+    
+    isGrabbingRef.current = true;
+    try {
+      console.log(">> GRAB REQUESTED:", offer.title || "Unknown Intel");
 
     const targetId = activePeer?.id || offer.id;
 
@@ -2207,20 +2273,22 @@ export default function App() {
         await result.cancelTransfer();
       }
     } else {
-      if (result && result.isRedundant) {
-        Alert.alert("Redundant Intel", "Redundant card. Everything is updated.");
-      } else if (result && result.error === 'NO_CARDS') {
-        Alert.alert("No Intel Found", `The target has no cards in the "${categoryToRequest}" category.`);
-      } else if (result && result.error === 'Target Invalid') {
-        Alert.alert("Ghost Signal Detected", "Target is invalid. This is usually a cached ghost signal. Please toggle Bluetooth OFF/ON to clear the hardware cache.");
-      } else {
-        Alert.alert("Connection Failed", result.error || "Target did not respond after 3 attempts.");
+        if (result && result.isRedundant) {
+          Alert.alert("Redundant Intel", "Redundant card. Everything is updated.");
+        } else if (result && result.error === 'NO_CARDS') {
+          Alert.alert("No Intel Found", `The target has no cards in the "${categoryToRequest}" category.`);
+        } else if (result && result.error === 'Target Invalid') {
+          Alert.alert("Ghost Signal Detected", "Target is invalid. This is usually a cached ghost signal. Please toggle Bluetooth OFF/ON to clear the hardware cache.");
+        } else {
+          Alert.alert("Connection Failed", result.error || "Target did not respond after 3 attempts.");
+        }
       }
+    } finally {
+      isGrabbingRef.current = false;
+      setIsLoading(false);
+      handleDismiss();
+      setTimeout(() => { if (viewMode === 'radar') BluetoothService.startScanning(handleDeviceFound); }, 1000);
     }
-
-    setIsLoading(false);
-    handleDismiss();
-    setTimeout(() => { if (viewMode === 'radar') BluetoothService.startScanning(handleDeviceFound); }, 1000);
   };
 
   const handleBlockOperator = async (card) => {
@@ -2362,7 +2430,7 @@ export default function App() {
       });
 
       // 2. Build the Escrow Card (Stale Card + New Signature)
-      const newHistory = [...safeHistory, universalEntry];
+      const newHistory = mergeAndSortLedgers(safeHistory, [universalEntry]);
       const calculatedHops = calculateTrueHops(newHistory);
 
       const escrowCard = {
@@ -2373,6 +2441,10 @@ export default function App() {
       };
 
       // 3. SECURE ESCROW: Write ledger immediately before transmission
+      
+      // CACHE PRE-ESCROW STATE FOR POTENTIAL ROLLBACK
+      global.preEscrowCard = card;
+      
       await insertOrReplaceCard(escrowCard);
       console.log(`>> DB: Escrow committed to SQLite for ${recipientHandle}.`);
 
@@ -2682,6 +2754,7 @@ export default function App() {
   };
 
   const [isSyncing, setIsSyncing] = useState(false); // Add this at the top of your App component
+  const [syncLogs, setSyncLogs] = useState([]);
 
   const handleAutoSync = async (cardId) => {
     if (isSyncing) return; // Prevent double-triggering
@@ -2701,20 +2774,32 @@ export default function App() {
         .flatMap(entry => [entry.author, entry.senderHandle, entry.recipientHandle, entry.user])
         .filter(handle => handle && handle !== myHandle);
 
-      const uniqueTargets = [...new Set(ledgerHandles)];
+      // Add everyone currently in the room
+      const roomHandles = nearbyDevices
+        .filter(peer => peer.handle !== myHandle)
+        .map(peer => peer.handle);
+
+      const uniqueTargets = [...new Set([...ledgerHandles, ...roomHandles])];
 
       if (uniqueTargets.length === 0) {
-        if (Platform.OS === 'android') ToastAndroid.show("No other operators in ledger.", ToastAndroid.SHORT);
+        if (Platform.OS === 'android') ToastAndroid.show("No other operators in ledger or in the room.", ToastAndroid.SHORT);
         setIsSyncing(false);
         return;
       }
 
+      setSyncLogs([]);
       console.log(`>> MESH: Auto-Sync targeting: ${uniqueTargets.join(', ')}`);
 
       await BluetoothService.startAdvertising().catch(() => { });
       setIsSyncScreenVisible(true);
 
-      await BluetoothService.pingTargetsForSync(card.id, uniqueTargets, myHandle);
+      // Loop through targets and forcefully PULL the delta using a stable, one-way connection
+      for (const targetHandle of uniqueTargets) {
+          setSyncLogs(prev => [...prev, `Asking ${targetHandle} for updates...`]);
+          await BluetoothService.initiateMeshSync(targetHandle, card);
+      }
+      
+      setSyncLogs(prev => [...prev, `All ledgers in the room have been updated.`]);
 
       // Reset sync state after a delay or when screen closes
       setTimeout(() => setIsSyncing(false), 5000);
@@ -2733,7 +2818,8 @@ export default function App() {
       const publicProfile = { ...p, publicKey: keys.publicKey };
       await saveProfile(publicProfile);
       setProfile(publicProfile);
-      BluetoothService.setHandle(publicProfile.handle);
+      const aliasStr = await AsyncStorage.getItem('@device_alias');
+      BluetoothService.setHandle(publicProfile.handle, aliasStr || '');
       Alert.alert("Welcome, Operator", "Identity established.");
     } catch (e) {
       console.error(">> ONBOARDING ERROR:", e);
@@ -2843,7 +2929,7 @@ export default function App() {
         event: activeUmpireEvent?.subject || "Mission"
       });
 
-      const finalHistory = [...safeHistory, universalEntry];
+      const finalHistory = mergeAndSortLedgers(safeHistory, [universalEntry]);
       const calculatedHops = calculateTrueHops(finalHistory);
 
       const finalizedCard = {
@@ -3744,6 +3830,7 @@ export default function App() {
       </Modal>
       <SyncStatusScreen
         isVisible={isSyncScreenVisible}
+        logs={syncLogs}
         onClose={async () => {
           setIsSyncScreenVisible(false); // Closes the screen
           await BluetoothService.stopBroadcasting().catch(() => { }); // Turns off the Beacon

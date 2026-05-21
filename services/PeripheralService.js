@@ -5,7 +5,7 @@ import { verifySignature, getOrGenerateKeys, signData } from '../model/Security'
 import { loadProfile } from '../model/Storage';
 
 const { SourceGattModule } = NativeModules;
-const CHUNK_SIZE = 150;
+const CHUNK_SIZE = 40; // Reduced to 40 bytes to bypass MediaTek Dimensity MTU hardware choke (Error 133)
 const MAX_HANDSHAKE_SIZE = 600;
 
 import { getAdvertisedCard } from './BroadcastState';
@@ -137,6 +137,7 @@ const onCardReceived = async (requestString) => {
         const nonce = parts[4];
 
         console.log(`>> BOUNCER: Challenge requested by ${senderHandle} for Card ${cardId}`);
+        DeviceEventEmitter.emit('syncStarted', { target: senderHandle });
 
         const localCard = await getCardById(cardId);
         if (!localCard) {
@@ -510,8 +511,8 @@ const sendCardInChunks = async (deviceId, card) => {
     let payloadToChunk = cardString;
 
     // === NEW SMART ROUTER (VECTOR 1) ===
-    if (totalSize > 2500) { 
-        console.log(">> SMART ROUTER: Payload exceeds 2.5KB threshold. Attempting Wi-Fi Override...");
+    if (totalSize > 2500000) { 
+        console.log(">> SMART ROUTER: Payload exceeds 2.5MB threshold. Attempting Wi-Fi Override...");
         try {
             const { ip, port } = await WifiMeshService.hostPayload(cardString);
             payloadToChunk = `REQ:WIFI_UPGRADE:${ip}:${port}`;
@@ -532,7 +533,8 @@ const sendCardInChunks = async (deviceId, card) => {
             return;
         }
         offset += CHUNK_SIZE;
-        await new Promise(r => setTimeout(r, 200));
+        // Strict 30ms sleep to prevent MTU choke on MediaTek chips
+        await new Promise(r => setTimeout(r, 30));
     }
 
     try {
@@ -558,6 +560,7 @@ const startServer = async () => {
             const result = await SourceGattModule.startServer();
             console.log(`>> ENGINE 4: ${result}`);
             console.log(">> ENGINE 4: Listening...");
+            Alert.alert("Engine 4 Status", "GATT Server Started Successfully!"); // FORCE VISUAL CONFIRMATION
         } catch (e) {
             console.error(">> ENGINE 4: FAILED to start GATT server", e);
             Alert.alert("GATT Server Failure", `Android failed to start the BLE Server. Code: ${e.message}`);
@@ -588,7 +591,8 @@ const sendSyncPingBack = async (cardId, mergedHistory) => {
             return;
         }
         offset += CHUNK_SIZE;
-        await new Promise(r => setTimeout(r, 200));
+        // Strict 30ms sleep to prevent MTU choke on MediaTek chips
+        await new Promise(r => setTimeout(r, 30));
     }
 
     try {
